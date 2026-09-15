@@ -29,6 +29,7 @@ adminRouter.get('/overview', async (_req, res) => {
       (SELECT COUNT(*) FROM users WHERE status = 'active')::int AS active_users,
       (SELECT COUNT(*) FROM users WHERE status = 'pending')::int AS pending_users,
       (SELECT COUNT(*) FROM conversations WHERE created_at >= date_trunc('month', now()))::int AS conversations_month,
+      (SELECT COUNT(*) FROM turns WHERE request_kind <> 'more' AND started_at >= date_trunc('month', now()))::int AS turns_month,
       (SELECT COALESCE(SUM(total_tokens), 0) FROM usage_events WHERE created_at >= date_trunc('month', now()))::float8 AS tokens_month,
       (SELECT COALESCE(SUM(cost_usd), 0) FROM usage_events WHERE created_at >= date_trunc('month', now()))::float8 AS cost_month,
       (SELECT COUNT(*) FROM usage_events WHERE kind = 'tagit' AND created_at >= date_trunc('month', now()))::int AS tagit_calls_month
@@ -157,6 +158,94 @@ adminRouter.get('/usage', async (req, res) => {
     ),
   ]);
   res.json({ events: events.rows, totals: totals.rows[0], limit, offset });
+});
+
+// ---------- Query log: one row per user request, with its searches and cost ----------
+
+function turnFilters(q) {
+  const where = [];
+  const params = [];
+  const add = (sql, value) => { params.push(value); where.push(sql.replaceAll('?', `$${params.length}`)); };
+  if (q.user_id) add('t.user_id = ?', Number(q.user_id));
+  if (q.status) add('t.status = ?', String(q.status));
+  if (q.kind) add('t.request_kind = ?', String(q.kind));
+  if (q.from) add('t.started_at >= ?::date', String(q.from));
+  if (q.to) add("t.started_at < (?::date + interval '1 day')", String(q.to));
+  if (q.q) add("(t.request_text ILIKE '%' || ? || '%' OR t.file_name ILIKE '%' || ? || '%')", String(q.q));
+  return { whereSql: where.length ? `WHERE ${where.join(' AND ')}` : '', params };
+}
+
+async function listTurns(q, limit, offset) {
+  const { whereSql, params } = turnFilters(q);
+  const [turns, totals] = await Promise.all([
+    query(
+      `SELECT t.id, t.user_id, t.user_email, t.conversation_id, c.title AS conversation_title,
+              t.request_kind, t.request_text, t.file_name, t.answers, t.status, t.error, t.started_at, t.finished_at,
+              EXTRACT(EPOCH FROM (COALESCE(t.finished_at, now()) - t.started_at))::float8 AS duration_seconds,
+              COUNT(e.id) FILTER (WHERE e.kind = 'claude')::int AS claude_calls,
+              COUNT(e.id) FILTER (WHERE e.kind = 'tagit')::int AS tagit_calls,
+              COALESCE(SUM(e.input_tokens), 0)::float8 AS input_tokens,
+              COALESCE(SUM(e.output_tokens), 0)::float8 AS output_tokens,
+              COALESCE(SUM(e.cache_creation_tokens), 0)::float8 AS cache_creation_tokens,
+              COALESCE(SUM(e.cache_read_tokens), 0)::float8 AS cache_read_tokens,
+              COALESCE(SUM(e.total_tokens), 0)::float8 AS total_tokens,
+              COALESCE(SUM(e.cost_usd), 0)::float8 AS cost_usd,
+              COALESCE(jsonb_agg(e.detail ORDER BY e.id) FILTER (WHERE e.kind = 'tagit'), '[]'::jsonb) AS searches
+       FROM turns t
+       LEFT JOIN usage_events e ON e.turn_id = t.id
+       LEFT JOIN conversations c ON c.id = t.conversation_id
+       ${whereSql}
+       GROUP BY t.id, c.title
+       ORDER BY t.started_at DESC, t.id DESC
+       LIMIT ${limit} OFFSET ${offset}`,
+      params,
+    ),
+    query(
+      `SELECT COUNT(DISTINCT t.id)::int AS turns,
+              COALESCE(SUM(e.total_tokens), 0)::float8 AS tokens,
+              COALESCE(SUM(e.cost_usd), 0)::float8 AS cost,
+              COUNT(e.id) FILTER (WHERE e.kind = 'tagit')::int AS tagit_calls
+       FROM turns t LEFT JOIN usage_events e ON e.turn_id = t.id
+       ${whereSql}`,
+      params,
+    ),
+  ]);
+  return { turns: turns.rows, totals: totals.rows[0] };
+}
+
+adminRouter.get('/turns', async (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 50, 500);
+  const offset = Math.max(Number(req.query.offset) || 0, 0);
+  res.json({ ...(await listTurns(req.query, limit, offset)), limit, offset });
+});
+
+const REQUEST_KIND_LABELS = { document: 'מסמך', text: 'הודעה', answers: 'תשובה לשאלות', more: 'תוצאות נוספות' };
+
+function requestDescription(t) {
+  if (Array.isArray(t.answers) && t.answers.length) {
+    const answers = t.answers
+      .map((a) => `${a.question}: ${[...(a.selected || []).map((s) => s.label), a.free_text].filter(Boolean).join(', ') || 'ללא העדפה'}`)
+      .join(' | ');
+    return [answers, t.request_text].filter(Boolean).join(' · ');
+  }
+  return [t.file_name, t.request_text].filter(Boolean).join(' · ');
+}
+
+adminRouter.get('/turns.csv', async (req, res) => {
+  const { turns } = await listTurns(req.query, 5000, 0);
+  const header = ['זמן', 'משתמש', 'סוג בקשה', 'בקשה', 'חיפושים ב-TAG-IT', 'קריאות Claude', 'טוקני קלט', 'טוקני פלט',
+    'כתיבה למטמון', 'קריאה ממטמון', 'סה"כ טוקנים', 'עלות משוערת (USD)', 'משך (שניות)', 'סטטוס', 'שגיאה', 'שיחה'];
+  const cell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+  const lines = turns.map((t) => [
+    new Date(t.started_at).toISOString(), t.user_email, REQUEST_KIND_LABELS[t.request_kind] || t.request_kind, requestDescription(t),
+    t.searches.map((s) => [s.action, s.label, s.total ?? s.returned, s.error ? `error: ${s.error}` : null].filter((x) => x != null).join(' ')).join(' | '),
+    t.claude_calls, t.input_tokens, t.output_tokens, t.cache_creation_tokens, t.cache_read_tokens, t.total_tokens,
+    t.cost_usd.toFixed(4), Math.round(t.duration_seconds), t.status, t.error, t.conversation_title,
+  ].map(cell).join(','));
+  const date = new Date().toISOString().slice(0, 10);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="teanot-queries-${date}.csv"`);
+  res.send(`﻿${[header.map(cell).join(','), ...lines].join('\r\n')}`);
 });
 
 adminRouter.get('/conversations/:id', async (req, res) => {

@@ -55,7 +55,7 @@ export async function assertQuota(account) {
   return quota;
 }
 
-export async function recordClaudeUsage({ account, conversationId, model, usage, detail }) {
+export async function recordClaudeUsage({ account, conversationId, turnId = null, model, usage, detail }) {
   const input = usage.input_tokens ?? 0;
   const output = usage.output_tokens ?? 0;
   const cacheWrite = usage.cache_creation_input_tokens ?? 0;
@@ -64,18 +64,18 @@ export async function recordClaudeUsage({ account, conversationId, model, usage,
   const cost = (input * price.input + output * price.output + cacheWrite * price.cacheWrite + cacheRead * price.cacheRead) / 1e6;
   await query(
     `INSERT INTO usage_events
-       (user_id, user_email, conversation_id, kind, model, input_tokens, output_tokens,
+       (user_id, user_email, conversation_id, turn_id, kind, model, input_tokens, output_tokens,
         cache_creation_tokens, cache_read_tokens, total_tokens, cost_usd, detail)
-     VALUES ($1, $2, $3, 'claude', $4, $5, $6, $7, $8, $9, $10, $11::jsonb)`,
-    [account.id, account.email, conversationId, model, input, output, cacheWrite, cacheRead,
+     VALUES ($1, $2, $3, $4, 'claude', $5, $6, $7, $8, $9, $10, $11, $12::jsonb)`,
+    [account.id, account.email, conversationId, turnId, model, input, output, cacheWrite, cacheRead,
       input + output + cacheWrite + cacheRead, cost, JSON.stringify(detail ?? null)],
   );
 }
 
-export async function recordTagitCall({ account, conversationId, detail }) {
+export async function recordTagitCall({ account, conversationId, turnId = null, detail }) {
   await query(
-    `INSERT INTO usage_events (user_id, user_email, conversation_id, kind, detail)
-     VALUES ($1, $2, $3, 'tagit', $4::jsonb)`,
-    [account.id, account.email, conversationId, JSON.stringify(detail ?? null)],
+    `INSERT INTO usage_events (user_id, user_email, conversation_id, turn_id, kind, detail)
+     VALUES ($1, $2, $3, $4, 'tagit', $5::jsonb)`,
+    [account.id, account.email, conversationId, turnId, JSON.stringify(detail ?? null)],
   );
 }

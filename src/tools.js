@@ -223,7 +223,7 @@ export function sentencingForModel(result, params) {
 // ---------- Executors ----------
 
 export async function executeTool(toolUse, ctx) {
-  const { account, conversationId, emit, signal } = ctx;
+  const { account, conversationId, turnId, emit, signal } = ctx;
   const activity = (label, state, extra = {}) => emit({ type: 'activity', id: toolUse.id, label, state, ...extra });
 
   switch (toolUse.name) {
@@ -253,14 +253,14 @@ export async function executeTool(toolUse, ctx) {
       activity(label, 'running');
       try {
         const result = await tagit.searchSentencing(params, { signal });
-        await recordTagitCall({ account, conversationId, detail: { action: 'search_sentencing', label: params.label, filter: result.filter, total: result.total, returned: result.items.length } });
+        await recordTagitCall({ account, conversationId, turnId, detail: { action: 'search_sentencing', label: params.label, filter: result.filter, total: result.total, returned: result.items.length } });
         const data = { label: params.label, params, total: result.total, page: result.page, size: result.size, items: result.items };
         activity(label, 'done', { summary: result.total != null ? `${result.total} תוצאות` : `${result.items.length} תוצאות` });
         emit({ type: 'results', toolUseId: toolUse.id, data });
         return { block: toolResult(toolUse, sentencingForModel(result, params)), ui: { type: 'results', data } };
       } catch (err) {
         if (signal?.aborted) throw err;
-        await recordTagitCall({ account, conversationId, detail: { action: 'search_sentencing', label: params.label, error: tagitErrorMessage(err) } });
+        await recordTagitCall({ account, conversationId, turnId, detail: { action: 'search_sentencing', label: params.label, error: tagitErrorMessage(err) } });
         activity(label, 'error');
         return { block: toolResult(toolUse, tagitErrorMessage(err), true), ui: null };
       }
@@ -274,7 +274,7 @@ export async function executeTool(toolUse, ctx) {
       activity(label, 'running');
       try {
         const result = await tagit.searchGuidelines(params, { signal });
-        await recordTagitCall({ account, conversationId, detail: { action: 'search_guidelines', label: params.label, queries: params.queries, returned: result.items.length } });
+        await recordTagitCall({ account, conversationId, turnId, detail: { action: 'search_guidelines', label: params.label, queries: params.queries, returned: result.items.length } });
         const data = { label: params.label, params, totals: result.totals, items: result.items };
         activity(label, 'done', { summary: `${result.items.length} הנחיות` });
         emit({ type: 'guidelines', toolUseId: toolUse.id, data });
@@ -291,7 +291,7 @@ export async function executeTool(toolUse, ctx) {
         };
       } catch (err) {
         if (signal?.aborted) throw err;
-        await recordTagitCall({ account, conversationId, detail: { action: 'search_guidelines', label: params.label, error: tagitErrorMessage(err) } });
+        await recordTagitCall({ account, conversationId, turnId, detail: { action: 'search_guidelines', label: params.label, error: tagitErrorMessage(err) } });
         activity(label, 'error');
         return { block: toolResult(toolUse, tagitErrorMessage(err), true), ui: null };
       }
@@ -340,7 +340,7 @@ export async function executeTool(toolUse, ctx) {
           const doc = await tagit.readGuideline(id, { signal });
           payload = { ...tagit.normalizeGuideline(doc), text: truncate(doc.content_text, maxChars), truncated: (doc.content_text?.length ?? 0) > maxChars };
         }
-        await recordTagitCall({ account, conversationId, detail: { action: 'read_document', kind, id } });
+        await recordTagitCall({ account, conversationId, turnId, detail: { action: 'read_document', kind, id } });
         activity(label, 'done');
         return { block: toolResult(toolUse, payload), ui: null };
       } catch (err) {

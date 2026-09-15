@@ -62,6 +62,29 @@ CREATE TABLE IF NOT EXISTS usage_events (
 );
 CREATE INDEX IF NOT EXISTS usage_events_user_created ON usage_events (user_id, created_at);
 CREATE INDEX IF NOT EXISTS usage_events_created ON usage_events (created_at DESC);
+
+-- One row per request a user sent (a chat turn, or a "more results" page). Usage events link to it,
+-- so the admin query log can show who asked what, which searches ran, and what it cost.
+CREATE TABLE IF NOT EXISTS turns (
+  id               SERIAL PRIMARY KEY,
+  user_id          INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  user_email       TEXT NOT NULL,
+  conversation_id  UUID,
+  request_kind     TEXT NOT NULL,                  -- document | text | answers | more
+  request_text     TEXT,
+  file_name        TEXT,
+  answers          JSONB,
+  status           TEXT NOT NULL DEFAULT 'running', -- running | completed | awaiting_input | aborted | interrupted | error | quota_exceeded | refused | truncated | iteration_limit
+  error            TEXT,
+  started_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at      TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS turns_started ON turns (started_at DESC);
+CREATE INDEX IF NOT EXISTS turns_user_started ON turns (user_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS turns_conversation ON turns (conversation_id, id DESC);
+
+ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS turn_id INTEGER;
+CREATE INDEX IF NOT EXISTS usage_events_turn ON usage_events (turn_id);
 `;
 
 const DEFAULT_SETTINGS = {
@@ -71,6 +94,11 @@ const DEFAULT_SETTINGS = {
 
 export async function migrate() {
   await exec(SCHEMA);
+  // A request still "running" at boot belonged to a process that was restarted mid-turn.
+  await query(
+    `UPDATE turns SET status = 'interrupted', error = COALESCE(error, 'השרת הופעל מחדש במהלך העיבוד'), finished_at = now()
+     WHERE status = 'running'`,
+  );
   for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
     await query(
       'INSERT INTO settings (key, value) VALUES ($1, $2::jsonb) ON CONFLICT (key) DO NOTHING',

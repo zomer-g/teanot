@@ -7,6 +7,7 @@ import { query } from '../db.js';
 import { loginUrl, logoutUrl, requireActive } from '../auth.js';
 import { documentBlock, documentFromText, extractDocument, MAX_UPLOAD_BYTES, UserFacingError } from '../extract.js';
 import { QuotaExceededError, assertQuota, getQuota, recordTagitCall } from '../usage.js';
+import { finishTurn, lastTurn, startTurn } from '../turns.js';
 import { runTurn } from '../agent.js';
 import { sentencingParamsSchema } from '../tools.js';
 import * as tagit from '../tagit.js';
@@ -16,7 +17,10 @@ export const chatRouter = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_UPLOAD_BYTES, files: 1 } });
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PASTED_DOCUMENT_CHARS = 1500;
-const activeTurns = new Set();
+
+// conversationId → { controller, turnId, emit }. A turn keeps running when the browser disconnects
+// (proxy cut, network blip, closed tab) and is saved as usual; only an explicit stop aborts it.
+const activeTurns = new Map();
 
 async function ownConversation(account, id) {
   if (!UUID_RE.test(id ?? '')) return null;
@@ -54,7 +58,12 @@ chatRouter.get('/conversations/:id', requireActive, async (req, res) => {
     'SELECT role, ui FROM messages WHERE conversation_id = $1 AND ui IS NOT NULL ORDER BY id',
     [conversation.id],
   );
-  res.json({ conversation, turns: rows });
+  res.json({
+    conversation,
+    turns: rows,
+    running: activeTurns.has(conversation.id),
+    lastRequest: await lastTurn(conversation.id),
+  });
 });
 
 // Soft delete: the usage log keeps referring to the conversation.
@@ -64,6 +73,23 @@ chatRouter.delete('/conversations/:id', requireActive, async (req, res) => {
   await query('UPDATE conversations SET deleted_at = now() WHERE id = $1', [conversation.id]);
   res.json({ ok: true });
 });
+
+chatRouter.post('/conversations/:id/stop', requireActive, async (req, res) => {
+  const conversation = await ownConversation(req.account, req.params.id);
+  if (!conversation) return res.status(404).json({ error: 'not_found' });
+  const active = activeTurns.get(conversation.id);
+  if (active) active.controller.abort();
+  res.json({ stopped: Boolean(active) });
+});
+
+function errorMessage(err) {
+  if (err instanceof Anthropic.RateLimitError) return 'שירות הבינה המלאכותית עמוס כרגע. נסו שוב בעוד דקה.';
+  if (err instanceof Anthropic.AuthenticationError) return 'מפתח ה-API של Anthropic אינו תקין. יש לפנות למנהל המערכת.';
+  if (err instanceof Anthropic.BadRequestError) return `הבקשה נדחתה על ידי שירות הבינה המלאכותית: ${err.message}`;
+  if (err instanceof Anthropic.APIError) return 'שירות הבינה המלאכותית החזיר שגיאה. נסו שוב.';
+  if (err instanceof Anthropic.AnthropicError && /authentication/i.test(err.message)) return 'מפתח ה-API של Anthropic לא הוגדר בשרת. יש לפנות למנהל המערכת.';
+  return 'אירעה שגיאה בעיבוד הבקשה. נסו שוב.';
+}
 
 chatRouter.post('/chat', requireActive, upload.single('file'), async (req, res) => {
   const account = req.account;
@@ -84,21 +110,26 @@ chatRouter.post('/chat', requireActive, upload.single('file'), async (req, res) 
   const userBlocks = [];
   let userUi;
   let docName = null;
+  let request;
   if (req.file) {
     const doc = await extractDocument(req.file);
     docName = doc.name;
     userBlocks.push(documentBlock(doc), { type: 'text', text: text || 'מצורף מסמך. נתח אותו.' });
     userUi = { type: 'user', text, fileName: doc.name };
+    request = { kind: 'document', text: text || null, fileName: doc.name };
   } else if (text.length > PASTED_DOCUMENT_CHARS && !answers) {
     const doc = documentFromText(text);
     docName = doc.name;
     userBlocks.push(documentBlock(doc), { type: 'text', text: 'המסמך הודבק כטקסט. נתח אותו.' });
     userUi = { type: 'user', text: `${text.slice(0, 400)}…`, fileName: 'טקסט שהודבק', pasted: true };
+    request = { kind: 'document', text: text.slice(0, 500), fileName: 'טקסט שהודבק' };
   } else if (text) {
     userBlocks.push({ type: 'text', text });
     userUi = { type: 'user', text, answers: answers ?? undefined };
+    request = { kind: answers ? 'answers' : 'text', text, answers };
   } else if (answers) {
     userUi = { type: 'user', text: '', answers };
+    request = { kind: 'answers', answers };
   } else {
     return res.status(400).json({ error: 'empty_message' });
   }
@@ -116,7 +147,21 @@ chatRouter.post('/chat', requireActive, upload.single('file'), async (req, res) 
     conversation = rows[0];
   }
   if (activeTurns.has(conversation.id)) return res.status(409).json({ error: 'turn_in_progress' });
-  activeTurns.add(conversation.id);
+
+  const controller = new AbortController();
+  let clientConnected = true;
+  const emit = (event) => {
+    if (clientConnected && !res.writableEnded) res.write(`data: ${JSON.stringify(event)}\n\n`);
+  };
+  activeTurns.set(conversation.id, { controller, turnId: null, emit });
+  let turnId;
+  try {
+    turnId = await startTurn({ account, conversationId: conversation.id, ...request });
+  } catch (err) {
+    activeTurns.delete(conversation.id);
+    throw err;
+  }
+  activeTurns.get(conversation.id).turnId = turnId;
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
@@ -124,33 +169,52 @@ chatRouter.post('/chat', requireActive, upload.single('file'), async (req, res) 
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
-  const emit = (event) => { if (!res.writableEnded) res.write(`data: ${JSON.stringify(event)}\n\n`); };
-  const heartbeat = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n'); }, 15000);
-  const controller = new AbortController();
-  res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+  const heartbeat = setInterval(() => { if (clientConnected && !res.writableEnded) res.write(': ping\n\n'); }, 15000);
+  res.on('close', () => { if (!res.writableEnded) clientConnected = false; });
 
+  const started = Date.now();
+  console.log(`[turn] start id=${turnId} user=${account.id} conversation=${conversation.id} kind=${request.kind}`);
   emit({ type: 'conversation', id: conversation.id, title: conversation.title });
+
+  let status = 'error';
+  let errorText = null;
   try {
-    await runTurn({ account, conversationId: conversation.id, userBlocks, userUi, answers, emit, signal: controller.signal });
+    status = await runTurn({ account, conversationId: conversation.id, turnId, userBlocks, userUi, answers, emit, signal: controller.signal });
   } catch (err) {
-    if (!controller.signal.aborted) {
-      console.error('[chat] turn failed', err);
-      let message = 'אירעה שגיאה בעיבוד הבקשה. נסו שוב.';
-      if (err instanceof Anthropic.RateLimitError) message = 'שירות הבינה המלאכותית עמוס כרגע. נסו שוב בעוד דקה.';
-      else if (err instanceof Anthropic.AuthenticationError) message = 'מפתח ה-API של Anthropic אינו תקין. יש לפנות למנהל המערכת.';
-      else if (err instanceof Anthropic.BadRequestError) message = `הבקשה נדחתה על ידי שירות הבינה המלאכותית: ${err.message}`;
-      else if (err instanceof Anthropic.APIError) message = 'שירות הבינה המלאכותית החזיר שגיאה. נסו שוב.';
-      else if (err instanceof Anthropic.AnthropicError && /authentication/i.test(err.message)) message = 'מפתח ה-API של Anthropic לא הוגדר בשרת. יש לפנות למנהל המערכת.';
-      emit({ type: 'error', message });
+    if (controller.signal.aborted) {
+      status = 'aborted';
+    } else {
+      console.error(`[turn] id=${turnId} failed`, err);
+      errorText = err.message;
+      emit({ type: 'error', message: errorMessage(err) });
     }
   } finally {
     clearInterval(heartbeat);
     activeTurns.delete(conversation.id);
-    emit({ type: 'quota', quota: await getQuota(account) });
+    await finishTurn(turnId, status, errorText).catch((err) => console.error('[turn] finish failed', err));
+    console.log(`[turn] end id=${turnId} status=${status} ms=${Date.now() - started} client=${clientConnected ? 'connected' : 'disconnected'}`);
+    try {
+      emit({ type: 'quota', quota: await getQuota(account) });
+    } catch (err) {
+      console.error('[turn] quota read failed', err);
+    }
     emit({ type: 'done' });
     res.end();
   }
 });
+
+// Called on shutdown: warn connected users, give running turns a short grace period,
+// and record whatever is still running as interrupted. Returns how many were interrupted.
+export async function drainActiveTurns(timeoutMs) {
+  for (const turn of activeTurns.values()) {
+    turn.emit({ type: 'notice', text: 'השרת מתעדכן כעת. אם התשובה לא תושלם, אפשר ללחוץ על "המשך".' });
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (activeTurns.size && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 250));
+  const remaining = [...activeTurns.values()].filter((turn) => turn.turnId);
+  await Promise.allSettled(remaining.map((turn) => finishTurn(turn.turnId, 'interrupted', 'השרת הופעל מחדש במהלך העיבוד')));
+  return remaining.length;
+}
 
 // "Show more" on a result card: fetches the next page without spending Claude tokens.
 chatRouter.post('/tagit/sentencing/more', requireActive, async (req, res) => {
@@ -159,12 +223,18 @@ chatRouter.post('/tagit/sentencing/more', requireActive, async (req, res) => {
   const parsed = sentencingParamsSchema.safeParse(req.body?.params);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_params' });
   const page = Math.max(1, Math.min(Number(req.body?.page) || 2, 50));
+  const turnId = await startTurn({
+    account: req.account, conversationId: conversation.id, kind: 'more', text: `${parsed.data.label} · עמוד ${page}`,
+  });
   try {
     const result = await tagit.searchSentencing(parsed.data, { page });
-    await recordTagitCall({ account: req.account, conversationId: conversation.id, detail: { action: 'more_sentencing', label: parsed.data.label, page, returned: result.items.length } });
+    await recordTagitCall({ account: req.account, conversationId: conversation.id, turnId, detail: { action: 'more_sentencing', label: parsed.data.label, page, total: result.total, returned: result.items.length } });
+    await finishTurn(turnId, 'completed');
     res.json({ page: result.page, total: result.total, items: result.items });
   } catch (err) {
     console.error('[tagit] more failed', err);
+    await recordTagitCall({ account: req.account, conversationId: conversation.id, turnId, detail: { action: 'more_sentencing', label: parsed.data.label, page, error: err.message } });
+    await finishTurn(turnId, 'error', err.message);
     res.status(502).json({ error: 'tagit_error' });
   }
 });

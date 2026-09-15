@@ -349,6 +349,7 @@ a:hover { color: var(--accent-text); }
 .modal .card-body { overflow-y: auto; }
 .transcript-turn { border-bottom: 1px solid var(--border); padding: 10px 0; font-size: 14px; }
 .transcript-turn pre { white-space: pre-wrap; word-wrap: break-word; font-family: inherit; margin: 4px 0 0; }
+.clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .muted { color: var(--muted); }
 .small { font-size: 13px; }
 

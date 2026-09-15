@@ -78,17 +78,20 @@ function pendingToolResults(history, answers) {
       : { type: 'tool_result', tool_use_id: block.id, content: 'This action did not complete: the turn was interrupted.', is_error: true }));
 }
 
-export async function runTurn({ account, conversationId, userBlocks, userUi, answers, emit, signal }) {
+// Returns how the turn ended: completed | awaiting_input | quota_exceeded | refused | truncated | iteration_limit.
+export async function runTurn({ account, conversationId, turnId, userBlocks, userUi, answers, emit, signal }) {
   const history = await loadHistory(conversationId);
   const userContent = [...pendingToolResults(history, answers), ...userBlocks];
   if (!userContent.length) throw new Error('empty_turn');
   await saveMessage(conversationId, 'user', userContent, userUi);
 
   const messages = [...history.map((row) => ({ role: row.role, content: row.content })), { role: 'user', content: userContent }];
+  let outcome = 'iteration_limit';
 
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
     if (iteration > 0 && (await getQuota(account)).exceeded) {
       emit({ type: 'notice', text: 'הגעת למגבלת הטוקנים שהוגדרה לחשבונך, ולכן העיבוד נעצר. ניתן לפנות למנהל המערכת.' });
+      outcome = 'quota_exceeded';
       break;
     }
     emit({ type: 'status', text: iteration === 0 ? 'חושב…' : 'ממשיך בעיבוד…' });
@@ -110,6 +113,7 @@ export async function runTurn({ account, conversationId, userBlocks, userUi, ans
     await recordClaudeUsage({
       account,
       conversationId,
+      turnId,
       model: message.model,
       usage: message.usage,
       detail: { iteration, stop_reason: message.stop_reason, tools: toolUses.map((t) => t.name) },
@@ -124,13 +128,18 @@ export async function runTurn({ account, conversationId, userBlocks, userUi, ans
 
     if (message.stop_reason === 'refusal') {
       emit({ type: 'error', message: 'המודל סירב להשלים את הבקשה. נסו לנסח אותה מחדש.' });
+      outcome = 'refused';
       break;
     }
     if (message.stop_reason === 'max_tokens') {
       emit({ type: 'notice', text: 'התשובה נקטעה כי הגיעה לאורך המרבי.' });
+      outcome = 'truncated';
       break;
     }
-    if (!toolUses.length) break;
+    if (!toolUses.length) {
+      outcome = 'completed';
+      break;
+    }
 
     const asks = [];
     const tasks = [];
@@ -140,7 +149,7 @@ export async function runTurn({ account, conversationId, userBlocks, userUi, ans
         if (parsed.success) asks.push({ toolUse, data: parsed.data });
         else tasks.push(Promise.resolve(validationError(toolUse, parsed.error.issues)));
       } else {
-        tasks.push(executeTool(toolUse, { account, conversationId, emit, signal }));
+        tasks.push(executeTool(toolUse, { account, conversationId, turnId, emit, signal }));
       }
     }
     const results = await Promise.all(tasks);
@@ -157,8 +166,12 @@ export async function runTurn({ account, conversationId, userBlocks, userUi, ans
       await saveMessage(conversationId, 'user', content, null);
       messages.push({ role: 'user', content });
     }
-    if (asks.length) break; // wait for the user's answers
+    if (asks.length) { // wait for the user's answers
+      outcome = 'awaiting_input';
+      break;
+    }
   }
 
   await query('UPDATE conversations SET updated_at = now() WHERE id = $1', [conversationId]);
+  return outcome;
 }

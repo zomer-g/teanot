@@ -65,7 +65,8 @@ const ACCEPTED_EXT = ['.pdf', '.docx', '.txt'];
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const PASTED_DOCUMENT_CHARS = 1500;
 
-const state = { me: null, conversations: [], currentId: null, busy: false, controller: null, file: null };
+// following = id of a conversation whose turn is still running on the server after the stream was lost.
+const state = { me: null, conversations: [], currentId: null, busy: false, controller: null, following: null, file: null };
 const root = document.getElementById('root');
 let ui = {};
 
@@ -150,7 +151,7 @@ function renderApp() {
       if (file) { e.preventDefault(); attachFile(file); }
     },
   });
-  const sendBtn = h('button', { class: 'send-btn', type: 'button', 'aria-label': 'שליחה', svg: ICONS.send, onClick: () => (state.busy ? state.controller?.abort() : send()) });
+  const sendBtn = h('button', { class: 'send-btn', type: 'button', 'aria-label': 'שליחה', svg: ICONS.send, onClick: () => (state.busy ? stopTurn() : send()) });
   const dropTarget = h('div', { class: 'drop-target' },
     attachment,
     h('div', { class: 'composer-row' },
@@ -284,7 +285,8 @@ function renderQuota(quota) {
 }
 
 function newConversation() {
-  if (state.busy) return;
+  if (state.controller) return;
+  stopFollowing();
   state.currentId = null;
   history.replaceState(null, '', location.pathname);
   showWelcome();
@@ -294,10 +296,14 @@ function newConversation() {
 }
 
 async function openConversation(id) {
-  if (state.busy) return;
+  if (state.controller) return;
+  stopFollowing();
   const res = await fetch(`/api/conversations/${id}`);
   if (!res.ok) { newConversation(); return; }
-  const { conversation, turns } = await res.json();
+  renderConversation(await res.json());
+}
+
+function renderConversation({ conversation, turns, running, lastRequest }) {
   state.currentId = conversation.id;
   history.replaceState(null, '', `#c=${conversation.id}`);
   ui.threadInner.replaceChildren();
@@ -316,11 +322,62 @@ async function openConversation(id) {
     assistant ??= createAssistantBlock(conversation.id);
     for (const item of turn.ui.items || []) {
       const isLive = index === lastQuestionsIndex && item === turn.ui.items.at(-1);
-      assistant.item(item, { live: isLive });
+      assistant.item(item, { live: isLive && !running });
     }
   });
   assistant?.finish();
+  if (running) {
+    followServerTurn(conversation.id, 'הבקשה האחרונה עדיין בעיבוד בשרת. התשובה תוצג כאן כשתסתיים.');
+  } else if (lastRequest && ['interrupted', 'error'].includes(lastRequest.status)) {
+    ui.threadInner.append(h('div', { class: 'notice-box' },
+      lastRequest.status === 'interrupted' ? 'העיבוד של הבקשה האחרונה נקטע לפני שהסתיים. ' : 'הבקשה האחרונה נכשלה. ',
+      h('button', { class: 'link-btn', type: 'button', onClick: () => send({ text: 'המשך מהמקום שבו נעצרת.' }) }, 'המשך')));
+  }
   scrollToBottom(true);
+}
+
+// ---------- Recovering a turn that outlived its stream ----------
+
+function stopFollowing() {
+  if (!state.following) return;
+  state.following = null;
+  setBusy(false);
+}
+
+function stopTurn() {
+  if (state.currentId) fetch(`/api/conversations/${state.currentId}/stop`, { method: 'POST' }).catch(() => {});
+  if (state.controller) state.controller.abort();
+  else stopFollowing();
+}
+
+// The server keeps working when the connection drops; poll until the turn ends, then show the saved result.
+async function followServerTurn(conversationId, message) {
+  const line = h('div', { class: 'activity' }, h('span', { class: 'spinner' }), h('span', { text: message }));
+  ui.threadInner.append(line);
+  scrollToBottom(true);
+  state.following = conversationId;
+  setBusy(true);
+  for (let attempt = 0; attempt < 225 && state.following === conversationId; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 4000));
+    if (state.following !== conversationId) break;
+    let data;
+    try {
+      const res = await fetch(`/api/conversations/${conversationId}`);
+      if (!res.ok) continue;
+      data = await res.json();
+    } catch {
+      continue; // still offline
+    }
+    if (!data.running) {
+      state.following = null;
+      setBusy(false);
+      if (state.currentId === conversationId) renderConversation(data);
+      loadConversations();
+      return;
+    }
+  }
+  line.remove();
+  if (state.following === conversationId) stopFollowing();
 }
 
 // ---------- Composer ----------
@@ -363,9 +420,9 @@ function renderUserMessage({ text, fileName, pasted, answers }) {
   scrollToBottom(true);
 }
 
-async function send({ answers = null } = {}) {
+async function send({ answers = null, text: presetText = null } = {}) {
   if (state.busy) return;
-  const text = answers ? '' : ui.textarea.value.trim();
+  const text = answers ? '' : (presetText ?? ui.textarea.value.trim());
   const file = answers ? null : state.file;
   if (!text && !file && !answers) return;
 
@@ -384,7 +441,7 @@ async function send({ answers = null } = {}) {
     fileName: file?.name ?? (isPasted ? 'טקסט שהודבק' : null),
     answers,
   });
-  if (!answers) {
+  if (!answers && presetText == null) {
     ui.textarea.value = '';
     autoGrow();
     clearFile();
@@ -394,6 +451,7 @@ async function send({ answers = null } = {}) {
   assistant.status('שולח…');
   setBusy(true);
   state.controller = new AbortController();
+  let connectionLost = false;
   try {
     const res = await fetch('/api/chat', { method: 'POST', body: form, signal: state.controller.signal });
     if (!res.ok) {
@@ -404,14 +462,19 @@ async function send({ answers = null } = {}) {
       return;
     }
     await readEvents(res, (event) => handleEvent(event, assistant));
+    if (!assistant.sawDone) connectionLost = true; // the stream ended without the server's "done"
   } catch (err) {
     if (err.name === 'AbortError') assistant.notice('העיבוד הופסק.');
-    else assistant.error('החיבור לשרת נותק. נסו שוב.');
+    else connectionLost = true;
   } finally {
     assistant.finish();
     setBusy(false);
     state.controller = null;
     loadConversations();
+  }
+  if (connectionLost) {
+    if (state.currentId) followServerTurn(state.currentId, 'החיבור לשרת נותק, אבל העיבוד ממשיך בשרת. התשובה המלאה תוצג כאן כשתסתיים.');
+    else ui.threadInner.append(h('div', { class: 'error-box', text: 'החיבור לשרת נותק. נסו שוב.' }));
   }
 }
 
@@ -454,6 +517,7 @@ function handleEvent(event, assistant) {
     case 'notice': assistant.notice(event.text); break;
     case 'error': assistant.error(event.message); break;
     case 'quota': renderQuota(event.quota); break;
+    case 'done': assistant.sawDone = true; break;
     default: break;
   }
 }

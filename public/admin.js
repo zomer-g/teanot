@@ -20,7 +20,15 @@ function h(tag, props, ...children) {
 }
 
 const fmtInt = (n) => (n == null ? '—' : Math.round(Number(n)).toLocaleString('he-IL'));
-const fmtUsd = (n) => `$${Number(n || 0).toFixed(2)}`;
+const fmtUsd = (n) => {
+  const value = Number(n || 0);
+  return `$${value.toFixed(value > 0 && value < 1 ? 3 : 2)}`;
+};
+const fmtDuration = (seconds) => {
+  if (seconds == null) return '—';
+  if (seconds < 60) return `${Math.round(seconds)} שנ׳`;
+  return `${Math.floor(seconds / 60)}:${String(Math.round(seconds % 60)).padStart(2, '0')} דק׳`;
+};
 const fmtDateTime = (v) => (v ? new Date(v).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' }) : '—');
 const STATUS_LABELS = { active: 'פעיל', pending: 'ממתין לאישור', blocked: 'חסום' };
 const ROLE_LABELS = { user: 'משתמש', admin: 'מנהל' };
@@ -43,7 +51,7 @@ function toast(text) {
   setTimeout(() => el.remove(), 2600);
 }
 
-const state = { users: [], settings: {}, usage: { offset: 0, limit: 100, filters: {} } };
+const state = { users: [], settings: {}, usage: { offset: 0, limit: 100, filters: {} }, queries: { offset: 0, limit: 50, filters: {} } };
 const select = (options, value, props = {}) =>
   h('select', { class: 'select', ...props }, Object.entries(options).map(([v, label]) => h('option', { value: v, selected: v === (value ?? '') }, label)));
 
@@ -55,6 +63,7 @@ async function loadOverview() {
   document.getElementById('stats').replaceChildren(
     stat('משתמשים פעילים', fmtInt(overview.active_users)),
     stat('ממתינים לאישור', fmtInt(overview.pending_users)),
+    stat('שאילתות החודש', fmtInt(overview.turns_month)),
     stat('שיחות החודש', fmtInt(overview.conversations_month)),
     stat('טוקנים החודש', fmtInt(overview.tokens_month)),
     stat('עלות משוערת החודש', fmtUsd(overview.cost_month)),
@@ -149,7 +158,7 @@ function renderUsers() {
       h('td', { class: 'num small', text: fmtDateTime(u.last_used_at || u.last_seen_at) }),
       h('td', {}, noteInput),
       h('td', {}, h('div', { class: 'row-actions' }, approve, save,
-        h('button', { class: 'btn btn-ghost btn-sm', type: 'button', onClick: () => { state.usage.filters = { user_id: u.id }; state.usage.offset = 0; switchTab('usage'); } }, 'יומן'))));
+        h('button', { class: 'btn btn-ghost btn-sm', type: 'button', onClick: () => { state.queries.filters = { user_id: u.id }; state.queries.offset = 0; switchTab('queries'); } }, 'שאילתות'))));
   });
 
   section.replaceChildren(
@@ -159,6 +168,119 @@ function renderUsers() {
       h('table', { class: 'data-table' },
         h('thead', {}, h('tr', {}, ['משתמש', 'סטטוס', 'תפקיד', 'מגבלת טוקנים', 'תקופה', 'שימוש בתקופה', 'טוקנים מצטבר', 'עלות מצטברת', 'שיחות', 'שימוש אחרון', 'הערה', ''].map((t) => h('th', { text: t })))),
         h('tbody', {}, rows))));
+}
+
+// ---------- Query log ----------
+
+const TURN_STATUS = {
+  completed: ['הושלם', 'badge-success'],
+  awaiting_input: ['ממתין לתשובת המשתמש', 'badge-muted'],
+  running: ['בעיבוד', 'badge-gold'],
+  aborted: ['הופסק על ידי המשתמש', 'badge-muted'],
+  interrupted: ['נקטע', 'badge-error'],
+  error: ['שגיאה', 'badge-error'],
+  quota_exceeded: ['מגבלת טוקנים', 'badge-error'],
+  refused: ['סירוב המודל', 'badge-error'],
+  truncated: ['נקטע (אורך)', 'badge-muted'],
+  iteration_limit: ['נעצר (מספר צעדים)', 'badge-muted'],
+};
+const REQUEST_KINDS = { document: 'מסמך', text: 'הודעה', answers: 'תשובה לשאלות', more: 'תוצאות נוספות' };
+const SEARCH_ACTIONS = { search_sentencing: 'גזרי דין', search_guidelines: 'הנחיות', more_sentencing: 'עוד גזרי דין', read_document: 'קריאת מסמך' };
+
+function queryFilterParams() {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(state.queries.filters)) if (v) params.set(k, v);
+  return params;
+}
+
+async function loadQueries() {
+  const params = queryFilterParams();
+  params.set('offset', state.queries.offset);
+  params.set('limit', state.queries.limit);
+  const data = await api(`/turns?${params}`);
+  if (!state.users.length) await loadUsers();
+  renderQueries(data);
+}
+
+function requestSummary(t) {
+  if (Array.isArray(t.answers) && t.answers.length) {
+    const answers = t.answers
+      .map((a) => `${a.question}: ${[...(a.selected || []).map((s) => s.label), a.free_text].filter(Boolean).join(', ') || 'ללא העדפה'}`)
+      .join(' | ');
+    return [answers, t.request_text].filter(Boolean).join(' · ');
+  }
+  return [t.file_name, t.request_text].filter(Boolean).join(' · ') || '—';
+}
+
+function searchLines(t) {
+  return (t.searches || []).filter((s) => s && s.action !== 'open_file').map((s) => h('div', { class: 'small' },
+    h('strong', { text: `${SEARCH_ACTIONS[s.action] || s.action}: ` }),
+    [s.label, s.action === 'read_document' ? `${s.kind === 'ruling' ? 'גזר דין' : 'הנחיה'} ${s.id}` : null].filter(Boolean).join(' '),
+    s.total != null ? ` (${fmtInt(s.total)})` : s.returned != null ? ` (${fmtInt(s.returned)})` : '',
+    s.error ? h('span', { style: 'color:var(--error)', title: s.error, text: ' · שגיאה' }) : null));
+}
+
+function renderQueries(data) {
+  const section = document.getElementById('tab-queries');
+  const { filters, offset, limit } = state.queries;
+  const userSel = h('select', { class: 'select' }, h('option', { value: '' }, 'כל המשתמשים'),
+    state.users.map((u) => h('option', { value: u.id, selected: String(u.id) === String(filters.user_id ?? '') }, u.email)));
+  const statusSel = select({ '': 'כל הסטטוסים', ...Object.fromEntries(Object.entries(TURN_STATUS).map(([k, [label]]) => [k, label])) }, filters.status ?? '');
+  const search = h('input', { class: 'input', type: 'search', placeholder: 'טקסט או שם קובץ', value: filters.q ?? '' });
+  const from = h('input', { class: 'input', type: 'date', value: filters.from ?? '' });
+  const to = h('input', { class: 'input', type: 'date', value: filters.to ?? '' });
+  const apply = () => {
+    state.queries.filters = { user_id: userSel.value, status: statusSel.value, q: search.value.trim(), from: from.value, to: to.value };
+    state.queries.offset = 0;
+    loadQueries();
+  };
+  search.addEventListener('keydown', (e) => { if (e.key === 'Enter') apply(); });
+
+  const rows = data.turns.map((t) => {
+    const [statusLabel, statusClass] = TURN_STATUS[t.status] || [t.status, 'badge-muted'];
+    const summary = requestSummary(t);
+    const searches = searchLines(t);
+    return h('tr', {},
+      h('td', { class: 'num small', text: fmtDateTime(t.started_at) }),
+      h('td', { class: 'small', style: 'white-space:nowrap', text: t.user_email }),
+      h('td', { style: 'min-width:220px;max-width:360px' },
+        h('span', { class: 'badge badge-muted', text: REQUEST_KINDS[t.request_kind] || t.request_kind }),
+        h('div', { class: 'small clamp-2', title: summary, text: summary })),
+      h('td', { style: 'min-width:180px;max-width:300px' }, searches.length ? searches : h('span', { class: 'small muted', text: '—' })),
+      h('td', { class: 'num', text: fmtInt(t.claude_calls) }),
+      h('td', {
+        class: 'num',
+        title: `קלט ${fmtInt(t.input_tokens)} · פלט ${fmtInt(t.output_tokens)} · כתיבה למטמון ${fmtInt(t.cache_creation_tokens)} · קריאה ממטמון ${fmtInt(t.cache_read_tokens)}`,
+        text: fmtInt(t.total_tokens),
+      }),
+      h('td', { class: 'num', style: 'font-weight:600', text: fmtUsd(t.cost_usd) }),
+      h('td', { class: 'num small', text: fmtDuration(t.duration_seconds) }),
+      h('td', {}, h('span', { class: `badge ${statusClass}`, title: t.error || '', text: statusLabel })),
+      h('td', {}, t.conversation_id
+        ? h('button', { class: 'btn btn-ghost btn-sm', type: 'button', onClick: () => openTranscript(t.conversation_id) }, 'שיחה')
+        : null));
+  });
+
+  section.replaceChildren(
+    h('div', { class: 'toolbar' },
+      h('label', { class: 'field' }, h('span', { class: 'label', text: 'משתמש' }), userSel),
+      h('label', { class: 'field' }, h('span', { class: 'label', text: 'סטטוס' }), statusSel),
+      h('label', { class: 'field' }, h('span', { class: 'label', text: 'חיפוש בבקשה' }), search),
+      h('label', { class: 'field' }, h('span', { class: 'label', text: 'מתאריך' }), from),
+      h('label', { class: 'field' }, h('span', { class: 'label', text: 'עד תאריך' }), to),
+      h('button', { class: 'btn btn-primary', type: 'button', onClick: apply }, 'סינון'),
+      h('a', { class: 'btn btn-secondary', href: `/api/admin/turns.csv?${queryFilterParams()}` }, 'ייצוא ל-CSV')),
+    h('p', { class: 'small' },
+      `${fmtInt(data.totals.turns)} שאילתות · ${fmtInt(data.totals.tokens)} טוקנים · עלות משוערת ${fmtUsd(data.totals.cost)} · ${fmtInt(data.totals.tagit_calls)} פעולות TAG-IT`,
+      h('span', { class: 'muted', text: ' · העלות מחושבת לפי מחירון Anthropic; מעבר עם העכבר על הטוקנים מציג פירוט.' })),
+    h('div', { class: 'card table-scroll' },
+      h('table', { class: 'data-table' },
+        h('thead', {}, h('tr', {}, ['זמן', 'משתמש', 'בקשה', 'חיפושים ב-TAG-IT', 'קריאות Claude', 'טוקנים', 'עלות', 'משך', 'סטטוס', ''].map((t) => h('th', { text: t })))),
+        h('tbody', {}, rows.length ? rows : h('tr', {}, h('td', { colspan: 10, class: 'muted', text: 'אין שאילתות' }))))),
+    h('div', { class: 'toolbar', style: 'margin-top:12px;justify-content:center' },
+      h('button', { class: 'btn btn-secondary btn-sm', type: 'button', disabled: offset === 0, onClick: () => { state.queries.offset = Math.max(0, offset - limit); loadQueries(); } }, 'הקודם'),
+      h('span', { class: 'small muted', text: data.turns.length ? `${offset + 1}–${offset + data.turns.length}` : '' }),
+      h('button', { class: 'btn btn-secondary btn-sm', type: 'button', disabled: offset + limit >= data.totals.turns, onClick: () => { state.queries.offset = offset + limit; loadQueries(); } }, 'הבא')));
 }
 
 // ---------- Usage log ----------
@@ -299,17 +421,22 @@ function renderSettings() {
 
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
-  ['users', 'usage', 'settings'].forEach((tab) => { document.getElementById(`tab-${tab}`).hidden = tab !== name; });
+  ['queries', 'users', 'usage', 'settings'].forEach((tab) => { document.getElementById(`tab-${tab}`).hidden = tab !== name; });
+  if (name === 'queries') loadQueries();
   if (name === 'usage') loadUsage();
   if (name === 'settings') renderSettings();
   if (name === 'users') loadUsers();
 }
 
 document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => {
-  if (t.dataset.tab === 'usage') state.usage.filters = {};
+  if (t.dataset.tab === 'usage') { state.usage.filters = {}; state.usage.offset = 0; }
+  if (t.dataset.tab === 'queries') { state.queries.filters = {}; state.queries.offset = 0; }
   switchTab(t.dataset.tab);
 }));
 
 const me = await (await fetch('/api/me')).json();
 if (!me.authenticated || me.user.role !== 'admin') location.href = '/';
-else await Promise.all([loadOverview(), loadUsers()]);
+else {
+  await Promise.all([loadOverview(), loadUsers()]);
+  await loadQueries();
+}

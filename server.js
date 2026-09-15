@@ -4,7 +4,7 @@ import express from 'express';
 import { initDb } from './src/db.js';
 import { migrate } from './src/migrate.js';
 import { attachUser, requireAdmin } from './src/auth.js';
-import { chatRouter, chatErrorHandler } from './src/routes/chat.js';
+import { chatRouter, chatErrorHandler, drainActiveTurns } from './src/routes/chat.js';
 import { adminRouter } from './src/routes/admin.js';
 import { runSelfCheck } from './src/selfcheck.js';
 
@@ -37,8 +37,20 @@ app.get('/admin', attachUser, (req, res) => {
 app.use(chatErrorHandler);
 
 const port = Number(process.env.XHOST_HTTP_PORT || process.env.PORT || 3000);
-app.listen(port, '0.0.0.0', () => {
+const server = app.listen(port, '0.0.0.0', () => {
   console.log(`[http] listening on ${port}`);
   // Runs after listen so it never delays the health check.
   if (process.env.SELFCHECK !== 'off') runSelfCheck().catch((err) => console.error('[selfcheck] failed', err));
+});
+
+// A deploy stops this container: give running turns a few seconds, then record the rest as interrupted.
+let shuttingDown = false;
+process.on('SIGTERM', async () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log('[http] SIGTERM received, draining active turns');
+  server.close();
+  const interrupted = await drainActiveTurns(8000);
+  console.log(`[http] exiting, interrupted turns: ${interrupted}`);
+  process.exit(0);
 });
