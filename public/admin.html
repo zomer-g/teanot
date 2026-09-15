@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>זומר · ניהול מערכת מחקר ענישה</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <a class="logo" href="/">
+      <img src="/icon.svg" alt="">
+      <span class="logo-text">זומר</span>
+      <span class="logo-sep">|</span>
+      <span class="logo-sub">ניהול מערכת</span>
+    </a>
+    <div class="header-actions">
+      <a class="btn btn-ghost btn-sm" href="/">חזרה לממשק</a>
+      <a class="btn btn-secondary btn-sm" href="/xhost-auth/logout?return_to=/">התנתקות</a>
+    </div>
+  </header>
+  <div class="admin-wrap">
+    <div class="admin-hero">
+      <div>
+        <div class="gold-bar"></div>
+        <h1>ניהול משתמשים ושימוש</h1>
+      </div>
+    </div>
+    <div class="stats" id="stats"></div>
+    <nav class="tabs" role="tablist">
+      <button class="tab active" type="button" data-tab="users">משתמשים</button>
+      <button class="tab" type="button" data-tab="usage">יומן שימוש</button>
+      <button class="tab" type="button" data-tab="settings">הגדרות מגבלה</button>
+    </nav>
+    <section id="tab-users"></section>
+    <section id="tab-usage" hidden></section>
+    <section id="tab-settings" hidden></section>
+  </div>
+  <script type="module" src="/admin.js"></script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+{
+  "name": "teanot",
+  "version": "1.0.0",
+  "description": "Zomer criminal sentencing research assistant",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.125.0",
+    "dompurify": "3.4.15",
+    "express": "5.2.1",
+    "jose": "6.2.12",
+    "mammoth": "1.12.3",
+    "marked": "18.0.13",
+    "multer": "2.4.0",
+    "pdf-parse": "1.1.1",
+    "pg": "8.23.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.8"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  }
+}
