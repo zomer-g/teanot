@@ -6,7 +6,6 @@
 const BASE = (process.env.TAGIT_API_URL || 'https://tag-it.biz').replace(/\/$/, '');
 const TIMEOUT_MS = Number(process.env.TAGIT_TIMEOUT_MS || 120_000);
 const rulingsKey = () => process.env.TAGIT_API_KEY;
-const guidelinesKey = () => process.env.TAGIT_GUIDELINES_API_KEY || process.env.TAGIT_API_KEY;
 export const SENTENCING_SCOPE = Number(process.env.TAGIT_SENTENCING_SCOPE || 1);
 
 // Canonical meta.drug_types name → slug used by meta.drug_total_g_<slug> / meta.drug_total_n_<slug>.
@@ -231,6 +230,29 @@ export async function readRulingText(id, { signal } = {}) {
 
 // ---------- Guidelines ----------
 
+// The guidelines API accepts only TAG-IT's server-wide PUBLIC_API_KEY, not per-client tagit_ keys.
+// Try the dedicated guidelines key first, then the main key, and stick with whichever one works.
+let guidelinesKeyInUse = null;
+export const guidelinesKeySource = () => guidelinesKeyInUse;
+
+async function guidelinesRequest(path, params, options) {
+  const candidates = [['guidelines', process.env.TAGIT_GUIDELINES_API_KEY], ['main', process.env.TAGIT_API_KEY]]
+    .filter(([, key], index, all) => key && all.findIndex(([, other]) => other === key) === index)
+    .sort((a, b) => (b[0] === guidelinesKeyInUse) - (a[0] === guidelinesKeyInUse));
+  let lastError = new TagitError(0, { error: 'missing_api_key' });
+  for (const [name, key] of candidates) {
+    try {
+      const result = await request(path, params, key, options);
+      guidelinesKeyInUse = name;
+      return result;
+    } catch (err) {
+      if (!(err instanceof TagitError) || err.status !== 401) throw err;
+      lastError = err;
+    }
+  }
+  throw lastError;
+}
+
 export function normalizeGuideline(g) {
   // file_url / text_url embed the server's own api_key: never pass them on.
   return {
@@ -251,9 +273,9 @@ export function normalizeGuideline(g) {
 export async function searchGuidelines(p, { signal } = {}) {
   const queries = p.queries?.length ? p.queries : [null];
   const lists = await Promise.all(queries.map((q) =>
-    request('/api/public/over-guidelines/documents', {
+    guidelinesRequest('/api/public/over-guidelines/documents', {
       q, topic: p.topic, source: p.source, limit: p.limit ?? 15, skip: 0,
-    }, guidelinesKey(), { signal })));
+    }, { signal })));
   const byId = new Map();
   lists.forEach((list, i) => {
     for (const g of list.items ?? []) {
@@ -270,14 +292,14 @@ export async function searchGuidelines(p, { signal } = {}) {
 }
 
 export async function readGuideline(id, { signal } = {}) {
-  return request(`/api/public/over-guidelines/documents/${encodeURIComponent(id)}`, {}, guidelinesKey(), { signal });
+  return guidelinesRequest(`/api/public/over-guidelines/documents/${encodeURIComponent(id)}`, {}, { signal });
 }
 
 // ---------- Files (proxied so the API key never reaches the browser) ----------
 
 export async function fetchFile(kind, id, { signal } = {}) {
-  const path = kind === 'guideline'
-    ? `/api/public/over-guidelines/documents/${encodeURIComponent(id)}/file`
-    : `/api/public/rulings/documents/${encodeURIComponent(id)}/file`;
-  return request(path, {}, kind === 'guideline' ? guidelinesKey() : rulingsKey(), { signal, raw: true });
+  if (kind === 'guideline') {
+    return guidelinesRequest(`/api/public/over-guidelines/documents/${encodeURIComponent(id)}/file`, {}, { signal, raw: true });
+  }
+  return request(`/api/public/rulings/documents/${encodeURIComponent(id)}/file`, {}, rulingsKey(), { signal, raw: true });
 }

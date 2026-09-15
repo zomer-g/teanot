@@ -85,7 +85,7 @@ export async function runSelfCheck() {
   report.tagitGuidelines = await timed(async () => {
     try {
       const result = await tagit.searchGuidelines({ queries: ['סמים'], limit: 3 });
-      return { ok: true, totals: result.totals, returned: result.items.length };
+      return { ok: true, keySource: tagit.guidelinesKeySource(), totals: result.totals, returned: result.items.length };
     } catch (err) {
       return errorInfo(err);
     }
