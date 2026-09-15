@@ -55,6 +55,7 @@ function parseInWorker(kind, buffer) {
     const worker = new Worker(new URL('./extract-worker.js', import.meta.url), {
       workerData: { kind, buffer },
       resourceLimits: WORKER_LIMITS,
+      execArgv: [], // do not inherit the parent's CLI flags (e.g. --watch, --input-type)
     });
     let settled = false;
     const settle = (fn, value) => {
