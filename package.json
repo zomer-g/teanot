@@ -10,6 +10,7 @@
   "type": "module",
   "dependencies": {
     "@anthropic-ai/sdk": "0.125.0",
+    "@fontsource-variable/heebo": "5.3.0",
     "dompurify": "3.4.15",
     "express": "5.2.1",
     "jose": "6.2.12",
@@ -21,7 +22,8 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "0.5.8"
+    "@electric-sql/pglite": "0.5.8",
+    "axe-core": "4.13.0"
   },
   "private": true,
   "engines": {

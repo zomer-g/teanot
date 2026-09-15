@@ -3,45 +3,55 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>זומר · ניהול מערכת מחקר ענישה</title>
+  <title>ניהול מערכת · זומר · מחקר ענישה</title>
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/vendor/heebo/index.css">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
+  <a class="skip-link" href="#content">דילוג לתוכן הראשי</a>
   <header class="app-header">
     <a class="logo" href="/">
-      <img src="/icon.svg" alt="">
+      <img src="/icon.svg" alt="" width="34" height="34">
       <span class="logo-text">זומר</span>
-      <span class="logo-sep">|</span>
+      <span class="logo-sep" aria-hidden="true">|</span>
       <span class="logo-sub">ניהול מערכת</span>
     </a>
-    <div class="header-actions">
+    <nav class="header-actions" aria-label="קישורים">
       <a class="btn btn-ghost btn-sm" href="/">חזרה לממשק</a>
       <a class="btn btn-secondary btn-sm" href="/xhost-auth/logout?return_to=/">התנתקות</a>
-    </div>
+    </nav>
   </header>
-  <div class="admin-wrap">
+  <aside class="sensitive-banner" aria-label="אזהרה על סוג המידע">
+    <strong>שימו לב:</strong> המערכת אינה מיועדת לחומר אישי או רגיש. אין להעלות מסמכים או טקסט הכוללים פרטים מזהים, כגון שמות, מספרי זהות, כתובות או מידע רפואי. יש להשמיט פרטים כאלה לפני השימוש.
+  </aside>
+  <main id="content" class="admin-wrap" tabindex="-1">
     <div class="admin-hero">
       <div>
         <div class="gold-bar"></div>
         <h1>ניהול משתמשים ושימוש</h1>
       </div>
     </div>
-    <div class="stats" id="stats"></div>
-    <nav class="tabs" role="tablist">
-      <button class="tab active" type="button" data-tab="queries">שאילתות</button>
-      <button class="tab" type="button" data-tab="users">משתמשים</button>
-      <button class="tab" type="button" data-tab="usage">יומן קריאות API</button>
-      <button class="tab" type="button" data-tab="settings">הגדרות מגבלה</button>
-    </nav>
-    <section id="tab-queries"></section>
-    <section id="tab-users" hidden></section>
-    <section id="tab-usage" hidden></section>
-    <section id="tab-settings" hidden></section>
-  </div>
+    <h2 class="sr-only">נתוני החודש</h2>
+    <dl class="stats" id="stats"></dl>
+    <div class="tabs" role="tablist" aria-label="אזורי ניהול">
+      <button class="tab active" type="button" role="tab" id="tabbtn-queries" aria-controls="tab-queries" aria-selected="true" data-tab="queries">שאילתות</button>
+      <button class="tab" type="button" role="tab" id="tabbtn-users" aria-controls="tab-users" aria-selected="false" tabindex="-1" data-tab="users">משתמשים</button>
+      <button class="tab" type="button" role="tab" id="tabbtn-usage" aria-controls="tab-usage" aria-selected="false" tabindex="-1" data-tab="usage">יומן קריאות API</button>
+      <button class="tab" type="button" role="tab" id="tabbtn-settings" aria-controls="tab-settings" aria-selected="false" tabindex="-1" data-tab="settings">הגדרות מגבלה</button>
+    </div>
+    <section id="tab-queries" role="tabpanel" aria-labelledby="tabbtn-queries" tabindex="0"></section>
+    <section id="tab-users" role="tabpanel" aria-labelledby="tabbtn-users" tabindex="0" hidden></section>
+    <section id="tab-usage" role="tabpanel" aria-labelledby="tabbtn-usage" tabindex="0" hidden></section>
+    <section id="tab-settings" role="tabpanel" aria-labelledby="tabbtn-settings" tabindex="0" hidden></section>
+  </main>
+  <footer class="site-footer">
+    <a href="/accessibility">הצהרת נגישות</a>
+    <span aria-hidden="true">·</span>
+    <a href="/privacy">מדיניות פרטיות</a>
+  </footer>
+  <div id="liveStatus" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+  <div id="liveAlert" class="sr-only" role="alert" aria-live="assertive" aria-atomic="true"></div>
   <script type="module" src="/admin.js"></script>
 </body>
 </html>

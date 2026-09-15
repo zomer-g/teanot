@@ -23,9 +23,17 @@ app.use(express.json({ limit: '1mb' }));
 app.get('/', (_req, res) => res.sendFile(path.join(publicDir, 'index.html')));
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 app.get('/admin.html', (_req, res) => res.redirect('/admin')); // only through the admin-checked route
+app.get('/accessibility', (_req, res) => res.sendFile(path.join(publicDir, 'accessibility.html')));
+app.get('/privacy', (_req, res) => res.sendFile(path.join(publicDir, 'privacy.html')));
 app.use(express.static(publicDir, { index: false }));
 app.get('/vendor/marked.js', (_req, res) => res.sendFile(path.join(root, 'node_modules/marked/lib/marked.esm.js')));
 app.get('/vendor/purify.js', (_req, res) => res.sendFile(path.join(root, 'node_modules/dompurify/dist/purify.es.mjs')));
+// Self-hosted font: no third-party request (and no visitor IP sent to Google).
+app.use('/vendor/heebo', express.static(path.join(root, 'node_modules/@fontsource-variable/heebo'), { maxAge: '30d' }));
+if (process.env.NODE_ENV !== 'production') {
+  // Accessibility testing aid (axe-core is a dev dependency and absent in production installs).
+  app.get('/vendor/axe.js', (_req, res) => res.sendFile(path.join(root, 'node_modules/axe-core/axe.min.js')));
+}
 
 app.use('/api', attachUser);
 app.use('/api/admin', adminRouter);
