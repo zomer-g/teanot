@@ -89,7 +89,14 @@ export async function runTurn({ account, conversationId, turnId, userBlocks, use
   let outcome = 'iteration_limit';
 
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
-    if (iteration > 0 && (await getQuota(account)).exceeded) {
+    // Re-checked before every Claude call, so blocking a user or lowering a limit takes effect mid-turn.
+    const { rows: [current] } = await query('SELECT status, token_limit, limit_period FROM users WHERE id = $1', [account.id]);
+    if (!current || current.status !== 'active') {
+      emit({ type: 'error', message: 'הגישה לחשבון אינה פעילה, ולכן העיבוד נעצר.' });
+      outcome = 'blocked';
+      break;
+    }
+    if ((await getQuota({ ...account, ...current })).exceeded) {
       emit({ type: 'notice', text: 'הגעת למגבלת הטוקנים שהוגדרה לחשבונך, ולכן העיבוד נעצר. ניתן לפנות למנהל המערכת.' });
       outcome = 'quota_exceeded';
       break;

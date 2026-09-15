@@ -5,8 +5,16 @@ const APP_TITLE = 'זומר · מחקר ענישה';
 const NEW_TAB = ' (נפתח בלשונית חדשה)';
 
 marked.setOptions({ breaks: true, gfm: true });
+// Model output can be steered by uploaded documents (prompt injection): allow Markdown structure only.
+// No images, media, <style>, forms, SVG or style attributes, so nothing can fetch remote URLs or overlay the UI.
+const PURIFY_CONFIG = {
+  ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'b', 'i', 'u', 'del', 's', 'ul', 'ol', 'li', 'a', 'code', 'pre', 'blockquote',
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'hr'],
+  ALLOWED_ATTR: ['href', 'title', 'start'],
+  ALLOWED_URI_REGEXP: /^(?:https?:|\/(?!\/)|#)/i,
+};
 DOMPurify.addHook('afterSanitizeAttributes', (node) => {
-  if (node.tagName === 'A') {
+  if (node.nodeName.toLowerCase() === 'a') {
     node.setAttribute('target', '_blank');
     node.setAttribute('rel', 'noopener noreferrer');
   }
@@ -21,6 +29,7 @@ function h(tag, props, ...children) {
     if (key === 'class') el.className = value;
     else if (key === 'text') el.textContent = value;
     else if (key === 'svg') el.innerHTML = value; // trusted static icons / sanitized markdown only
+    else if (key === 'style') el.style.cssText = value; // CSSOM, so a strict CSP needs no 'unsafe-inline'
     else if (key.startsWith('on')) el.addEventListener(key.slice(2).toLowerCase(), value);
     else el.setAttribute(key, value === true ? '' : value);
   }
@@ -34,8 +43,10 @@ function h(tag, props, ...children) {
 let uid = 0;
 const nextId = (prefix) => `${prefix}-${++uid}`;
 const srOnly = (text) => h('span', { class: 'sr-only', text });
+// Only http(s) or same-origin paths may become links (upstream data is not trusted).
+const safeUrl = (url) => (typeof url === 'string' && /^(?:https?:\/\/|\/(?!\/))/i.test(url) ? url : null);
 const externalLink = (href, text, context = '') =>
-  h('a', { href, target: '_blank', rel: 'noopener noreferrer' }, text, srOnly(`${context}${NEW_TAB}`));
+  (safeUrl(href) ? h('a', { href, target: '_blank', rel: 'noopener noreferrer' }, text, srOnly(`${context}${NEW_TAB}`)) : h('span', {}, text));
 
 // Links written by the model open in a new tab; say so to screen reader users.
 function decorateLinks(container) {
@@ -55,7 +66,7 @@ const ICONS = {
   plus: svg('<path d="M12 5v14M5 12h14"/>'),
 };
 
-const markdown = (text) => DOMPurify.sanitize(marked.parse(text || ''));
+const markdown = (text) => DOMPurify.sanitize(marked.parse(String(text || '')), PURIFY_CONFIG);
 const fmtDate = (value) => {
   if (!value) return null;
   const d = new Date(value);
@@ -513,10 +524,11 @@ function clearFile() {
 function renderUserMessage({ text, fileName, pasted, answers }) {
   const bubble = h('div', { class: 'bubble-user' }, srOnly('ההודעה שלך: '));
   if (fileName) bubble.append(h('div', { class: 'file-chip' }, h('span', { svg: ICONS.file, style: 'display:inline-flex' }), fileName), h('br'));
-  if (answers?.length) {
-    bubble.append(...answers.map((a) => {
-      const value = [...(a.selected || []).map((s) => s.label), a.free_text].filter(Boolean).join(', ') || 'ללא העדפה';
-      return h('div', {}, h('strong', { text: `${a.question}: ` }), value);
+  if (Array.isArray(answers)) {
+    bubble.append(...answers.filter((a) => a && typeof a === 'object').map((a) => {
+      const selected = Array.isArray(a.selected) ? a.selected.map((s) => s?.label) : [];
+      const value = [...selected, a.free_text].filter((x) => typeof x === 'string' && x).join(', ') || 'ללא העדפה';
+      return h('div', {}, h('strong', { text: `${String(a.question ?? '')}: ` }), value);
     }));
   }
   if (text) bubble.append(h('div', { text: pasted && !text.endsWith('…') ? `${text}…` : text }));

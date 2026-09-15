@@ -1,13 +1,29 @@
 import { marked } from '/vendor/marked.js';
 import DOMPurify from '/vendor/purify.js';
 
+// Same Markdown-only allowlist as the chat: transcripts show other users' (model-written) content.
+const PURIFY_CONFIG = {
+  ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'b', 'i', 'u', 'del', 's', 'ul', 'ol', 'li', 'a', 'code', 'pre', 'blockquote',
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'hr'],
+  ALLOWED_ATTR: ['href', 'title', 'start'],
+  ALLOWED_URI_REGEXP: /^(?:https?:|\/(?!\/)|#)/i,
+};
+DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+  if (node.nodeName.toLowerCase() === 'a') {
+    node.setAttribute('target', '_blank');
+    node.setAttribute('rel', 'noopener noreferrer');
+  }
+});
+const markdown = (text) => DOMPurify.sanitize(marked.parse(String(text || '')), PURIFY_CONFIG);
+
 function h(tag, props, ...children) {
   const el = document.createElement(tag);
   for (const [key, value] of Object.entries(props || {})) {
     if (value == null || value === false) continue;
     if (key === 'class') el.className = value;
     else if (key === 'text') el.textContent = value;
-    else if (key === 'html') el.innerHTML = value;
+    else if (key === 'html') el.innerHTML = value; // sanitized markdown only
+    else if (key === 'style') el.style.cssText = value; // CSSOM, so a strict CSP needs no 'unsafe-inline'
     else if (key.startsWith('on')) el.addEventListener(key.slice(2).toLowerCase(), value);
     else if (key === 'value') el.value = value;
     else el.setAttribute(key, value === true ? '' : value);
@@ -217,6 +233,7 @@ const TURN_STATUS = {
   awaiting_input: ['ממתין לתשובת המשתמש', 'badge-muted'],
   running: ['בעיבוד', 'badge-gold'],
   aborted: ['הופסק על ידי המשתמש', 'badge-muted'],
+  blocked: ['נעצר (גישה לא פעילה)', 'badge-error'],
   interrupted: ['נקטע', 'badge-error'],
   error: ['שגיאה', 'badge-error'],
   quota_exceeded: ['מגבלת טוקנים', 'badge-error'],
@@ -242,13 +259,19 @@ async function loadQueries() {
   renderQueries(data);
 }
 
+// Tolerates malformed stored answers (older rows or crafted payloads) instead of breaking the page.
+function answersText(answers, separator) {
+  if (!Array.isArray(answers)) return '';
+  return answers.filter((a) => a && typeof a === 'object').map((a) => {
+    const selected = Array.isArray(a.selected) ? a.selected.map((s) => s?.label) : [];
+    const value = [...selected, a.free_text].filter((x) => typeof x === 'string' && x).join(', ') || 'ללא העדפה';
+    return `${String(a.question ?? '')}: ${value}`;
+  }).join(separator);
+}
+
 function requestSummary(t) {
-  if (Array.isArray(t.answers) && t.answers.length) {
-    const answers = t.answers
-      .map((a) => `${a.question}: ${[...(a.selected || []).map((s) => s.label), a.free_text].filter(Boolean).join(', ') || 'ללא העדפה'}`)
-      .join(' | ');
-    return [answers, t.request_text].filter(Boolean).join(' · ');
-  }
+  const answers = answersText(t.answers, ' | ');
+  if (answers) return [answers, t.request_text].filter(Boolean).join(' · ');
   return [t.file_name, t.request_text].filter(Boolean).join(' · ') || '—';
 }
 
@@ -438,7 +461,7 @@ async function openTranscript(id) {
   const turns = messages.map((m) => {
     const u = m.ui || {};
     if (m.role === 'user') {
-      const answers = (u.answers || []).map((a) => `${a.question}: ${[...(a.selected || []).map((s) => s.label), a.free_text].filter(Boolean).join(', ')}`).join('\n');
+      const answers = answersText(u.answers, '\n');
       return h('div', { class: 'transcript-turn' },
         h('h3', { class: 'small', style: 'margin:0', text: `משתמש · ${fmtDateTime(m.created_at)}` }),
         u.fileName ? h('p', { class: 'small muted', style: 'margin:0', text: `קובץ: ${u.fileName}` }) : null,
@@ -447,7 +470,7 @@ async function openTranscript(id) {
     return h('div', { class: 'transcript-turn' },
       h('h3', { class: 'small', style: 'margin:0', text: `מערכת · ${fmtDateTime(m.created_at)}` }),
       (u.items || []).map((item) => {
-        if (item.type === 'text') return h('div', { class: 'assistant-text', html: DOMPurify.sanitize(marked.parse(item.text)) });
+        if (item.type === 'text') return h('div', { class: 'assistant-text', html: markdown(item.text) });
         if (item.type === 'analysis') {
           return h('div', { class: 'notice-box' }, `ניתוח: ${item.data.title} · `,
             item.data.defendants.map((d) => `${d.label}: ${d.counts.map((c) => c.section || c.offense).join(', ')}`).join(' | '));

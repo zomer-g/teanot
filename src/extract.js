@@ -1,13 +1,15 @@
 // Turns an uploaded Word/PDF/text file into something Claude can read.
-// Text is preferred (cheaper). A PDF whose text layer is missing (scans) or garbled
-// (visually-ordered Hebrew) is sent to Claude as a native PDF document instead.
+// Parsing untrusted files happens in a worker thread with a memory cap and a timeout (extract-worker.js),
+// so a zip bomb or a hostile PDF fails the request instead of taking the server down.
+// Text is preferred (cheaper). A PDF whose text layer is missing (scans) or garbled (visually-ordered
+// Hebrew) is sent to Claude as a native PDF document instead.
 import path from 'node:path';
-import mammoth from 'mammoth';
-// Import the library entry directly: pdf-parse's index.js runs a debug harness under ESM.
-import pdfParse from 'pdf-parse/lib/pdf-parse.js';
+import { Worker } from 'node:worker_threads';
 
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 const MAX_TEXT_CHARS = 600_000;
+const WORKER_TIMEOUT_MS = 60_000;
+const WORKER_LIMITS = { maxOldGenerationSizeMb: 512, maxYoungGenerationSizeMb: 64 };
 
 export class UserFacingError extends Error {}
 
@@ -48,23 +50,58 @@ export function documentFromText(text, name = 'טקסט שהודבק') {
   return { kind: 'text', name, text: assertLength(normalize(text)) };
 }
 
+function parseInWorker(kind, buffer) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL('./extract-worker.js', import.meta.url), {
+      workerData: { kind, buffer },
+      resourceLimits: WORKER_LIMITS,
+    });
+    let settled = false;
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      worker.terminate();
+      fn(value);
+    };
+    const timer = setTimeout(() => settle(reject, new Error('extraction timed out')), WORKER_TIMEOUT_MS);
+    worker.on('message', (message) => {
+      if (message.ok) settle(resolve, message);
+      else settle(reject, message.userError ? new UserFacingError(message.userError) : new Error(message.error));
+    });
+    worker.on('error', (err) => settle(reject, err)); // includes ERR_WORKER_OUT_OF_MEMORY
+    worker.on('exit', (code) => settle(reject, new Error(`extraction worker exited with code ${code}`)));
+  });
+}
+
 export async function extractDocument(file) {
   const name = decodeFileName(file.originalname || 'document');
   const ext = path.extname(name).toLowerCase();
 
   if (ext === '.docx') {
-    const { value } = await mammoth.extractRawText({ buffer: file.buffer });
-    return documentFromText(value, name);
+    let text;
+    try {
+      ({ text } = await parseInWorker('docx', file.buffer));
+    } catch (err) {
+      if (err instanceof UserFacingError) throw err;
+      console.warn('[extract] docx parsing failed', err.message);
+      throw new UserFacingError('לא ניתן היה לקרוא את קובץ ה-Word. נסו לשמור אותו מחדש או לצרף אותו כ-PDF.');
+    }
+    return documentFromText(text, name);
   }
   if (ext === '.pdf') {
+    if (!file.buffer.subarray(0, 1024).toString('latin1').includes('%PDF-')) {
+      throw new UserFacingError('הקובץ אינו PDF תקין.');
+    }
     let text = '';
     let pages = 0;
     try {
-      const parsed = await pdfParse(file.buffer);
+      const parsed = await parseInWorker('pdf', file.buffer);
       text = normalize(parsed.text || '');
-      pages = parsed.numpages || 0;
+      pages = parsed.pages || 0;
     } catch (err) {
-      console.warn('[extract] pdf text extraction failed, falling back to native PDF', err.message);
+      if (err instanceof UserFacingError) throw err;
+      console.warn('[extract] pdf text extraction failed, sending the PDF itself', err.message);
     }
     if (pdfTextIsUsable(text, pages)) return { kind: 'text', name, text: assertLength(text), pages };
     return { kind: 'pdf', name, base64: file.buffer.toString('base64') };
@@ -76,6 +113,34 @@ export async function extractDocument(file) {
     throw new UserFacingError('קובץ Word בפורמט הישן (.doc) אינו נתמך. יש לשמור אותו כ-docx או כ-PDF ולצרף שוב.');
   }
   throw new UserFacingError('ניתן לצרף קובצי Word (docx), PDF או טקסט בלבד.');
+}
+
+// A one-page PDF built in memory, used to prove at boot that PDF parsing works on this runtime.
+function probePdf(text) {
+  const content = `BT /F1 12 Tf 20 50 Td (${text}) Tj ET`;
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 100] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+  ];
+  let pdf = '%PDF-1.4\n';
+  const offsets = objects.map((body, i) => {
+    const offset = pdf.length;
+    pdf += `${i + 1} 0 obj\n${body}\nendobj\n`;
+    return offset;
+  });
+  const xref = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}`;
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(pdf, 'latin1');
+}
+
+export async function probePdfExtraction() {
+  const expected = 'teanot selfcheck';
+  const { text, pages } = await parseInWorker('pdf', probePdf(expected));
+  return { pages, textFound: normalize(text || '').includes(expected) };
 }
 
 // The Claude content block that carries the document in the first user turn.

@@ -115,6 +115,17 @@ export function buildSentencingFilter(p) {
 
 const arr = (v) => (Array.isArray(v) ? v : v == null ? [] : [v]);
 const num = (v) => (v == null || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
+// Upstream data is not trusted: links must be http(s), and file routes need a numeric id.
+const httpUrl = (value) => {
+  if (typeof value !== 'string') return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.href : null;
+  } catch {
+    return null;
+  }
+};
+const numericId = (value) => (/^\d{1,15}$/.test(String(value ?? '')) ? String(value) : null);
 
 function rangeText(bound) {
   if (bound == null) return null;
@@ -170,8 +181,8 @@ export function normalizeRuling(item) {
       min: rangeText(r?.['מתחם_מינימום']),
       max: rangeText(r?.['מתחם_מקסימום']),
     })),
-    sourceUrl: item.source_url ?? null,
-    fileUrl: `/api/tagit/rulings/${id}/file`,
+    sourceUrl: httpUrl(item.source_url),
+    fileUrl: numericId(id) ? `/api/tagit/rulings/${numericId(id)}/file` : null,
   };
 }
 
@@ -230,7 +241,7 @@ export async function readRulingText(id, { signal } = {}) {
 
 // ---------- Guidelines ----------
 
-// The guidelines API accepts only TAG-IT's server-wide PUBLIC_API_KEY, not per-client tagit_ keys.
+// The guidelines API may need a different key than the rulings API.
 // Try the dedicated guidelines key first, then the main key, and stick with whichever one works.
 let guidelinesKeyInUse = null;
 export const guidelinesKeySource = () => guidelinesKeyInUse;
@@ -266,7 +277,7 @@ export function normalizeGuideline(g) {
     supersedes: g.supersedes ?? null,
     summary: g.summary ?? null,
     hasText: g.has_text ?? null,
-    fileUrl: `/api/tagit/guidelines/${g.id}/file`,
+    fileUrl: numericId(g.id) ? `/api/tagit/guidelines/${numericId(g.id)}/file` : null,
   };
 }
 

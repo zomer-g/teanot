@@ -1,26 +1,70 @@
 // End-user API: identity, conversations, the streaming chat turn, and TAG-IT passthroughs.
 import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { Router } from 'express';
 import multer from 'multer';
+import { z } from 'zod';
 import Anthropic from '@anthropic-ai/sdk';
 import { query } from '../db.js';
 import { loginUrl, logoutUrl, requireActive } from '../auth.js';
 import { documentBlock, documentFromText, extractDocument, MAX_UPLOAD_BYTES, UserFacingError } from '../extract.js';
 import { QuotaExceededError, assertQuota, getQuota, recordTagitCall } from '../usage.js';
 import { finishTurn, lastTurn, startTurn } from '../turns.js';
+import { rateLimit } from '../security.js';
 import { runTurn } from '../agent.js';
 import { sentencingParamsSchema } from '../tools.js';
 import * as tagit from '../tagit.js';
 
 export const chatRouter = Router();
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_UPLOAD_BYTES, files: 1 } });
+const upload = multer({
+  storage: multer.memoryStorage(),
+  // Caps every part of the multipart body, not only the file (busboy's own defaults are unlimited).
+  limits: { fileSize: MAX_UPLOAD_BYTES, files: 1, fields: 4, fieldSize: 1_400_000, parts: 6, headerPairs: 50 },
+});
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PASTED_DOCUMENT_CHARS = 1500;
+const MAX_TURNS_PER_USER = 2;
+const MAX_STREAMS_PER_TURN = 3;
+const MAX_STREAM_BUFFER_BYTES = 2 * 1024 * 1024;
+const TEN_MINUTES = 10 * 60_000;
 
-// conversationId → { controller, turnId, emit }. A turn keeps running when the browser disconnects
-// (proxy cut, network blip, closed tab) and is saved as usual; only an explicit stop aborts it.
+const answersSchema = z.array(z.object({
+  id: z.string().max(100),
+  question: z.string().max(500),
+  selected: z.array(z.object({ value: z.string().max(200), label: z.string().max(300) })).max(10).default([]),
+  free_text: z.string().max(2000).nullable().optional(),
+})).min(1).max(4);
+
+// conversationId → { controller, userId, turnId, events, listeners, reconnects, emit }. A turn keeps running
+// when the browser disconnects (proxy cut, network blip, closed tab); only an explicit stop aborts it.
 const activeTurns = new Map();
+
+// Chat requests in flight per user, counted from arrival until the turn ends. Parallel turns would each
+// pass the quota check before any usage is recorded, so they are capped.
+const turnSlots = new Map();
+
+function reserveTurnSlot(req, res, next) {
+  const userId = req.account.id;
+  const used = turnSlots.get(userId) ?? 0;
+  if (used >= MAX_TURNS_PER_USER) {
+    return res.status(429).json({ error: 'too_many_turns', message: 'כבר יש בקשות בעיבוד בחשבון שלך. המתינו לסיומן ונסו שוב.' });
+  }
+  turnSlots.set(userId, used + 1);
+  let released = false;
+  req.releaseTurnSlot = () => {
+    if (released) return;
+    released = true;
+    const left = (turnSlots.get(userId) ?? 1) - 1;
+    if (left > 0) turnSlots.set(userId, left);
+    else turnSlots.delete(userId);
+  };
+  // Requests that end before a turn starts (validation errors, 409, quota) give the slot back.
+  const releaseIfNoTurn = () => { if (!req.turnStarted) req.releaseTurnSlot(); };
+  res.on('finish', releaseIfNoTurn);
+  res.on('close', releaseIfNoTurn);
+  next();
+}
 
 async function ownConversation(account, id) {
   if (!UUID_RE.test(id ?? '')) return null;
@@ -82,21 +126,26 @@ chatRouter.post('/conversations/:id/stop', requireActive, async (req, res) => {
   res.json({ stopped: Boolean(active) });
 });
 
+// User-facing messages stay generic; details go to the server log.
 function errorMessage(err) {
   if (err instanceof Anthropic.RateLimitError) return 'שירות הבינה המלאכותית עמוס כרגע. נסו שוב בעוד דקה.';
   if (err instanceof Anthropic.AuthenticationError) return 'מפתח ה-API של Anthropic אינו תקין. יש לפנות למנהל המערכת.';
-  if (err instanceof Anthropic.BadRequestError) return `הבקשה נדחתה על ידי שירות הבינה המלאכותית: ${err.message}`;
+  if (err instanceof Anthropic.BadRequestError) return 'שירות הבינה המלאכותית דחה את הבקשה. אם צורף מסמך גדול במיוחד, נסו לצרף רק את החלק הרלוונטי.';
   if (err instanceof Anthropic.APIError) return 'שירות הבינה המלאכותית החזיר שגיאה. נסו שוב.';
   if (err instanceof Anthropic.AnthropicError && /authentication/i.test(err.message)) return 'מפתח ה-API של Anthropic לא הוגדר בשרת. יש לפנות למנהל המערכת.';
   return 'אירעה שגיאה בעיבוד הבקשה. נסו שוב.';
 }
 
-chatRouter.post('/chat', requireActive, upload.single('file'), async (req, res) => {
+chatRouter.post('/chat', requireActive, rateLimit({ name: 'chat', limit: 30, windowMs: TEN_MINUTES }), reserveTurnSlot, upload.single('file'), async (req, res) => {
   const account = req.account;
   const text = String(req.body.text ?? '').trim();
   let answers = null;
   if (req.body.answers) {
-    try { answers = JSON.parse(req.body.answers); } catch { return res.status(400).json({ error: 'invalid_answers' }); }
+    let raw;
+    try { raw = JSON.parse(req.body.answers); } catch { return res.status(400).json({ error: 'invalid_answers' }); }
+    const parsed = answersSchema.safeParse(raw);
+    if (!parsed.success) return res.status(400).json({ error: 'invalid_answers' });
+    answers = parsed.data;
   }
 
   try {
@@ -151,7 +200,7 @@ chatRouter.post('/chat', requireActive, upload.single('file'), async (req, res) 
   const controller = new AbortController();
   // Every event is numbered and kept for the life of the turn, so a browser whose connection was
   // cut can rejoin with GET /conversations/:id/stream?after=<last seq> and miss nothing.
-  const entry = { controller, turnId: null, events: [], listeners: new Set(), reconnects: 0 };
+  const entry = { controller, userId: account.id, turnId: null, events: [], listeners: new Set(), reconnects: 0 };
   entry.emit = (event) => {
     const stamped = { ...event, seq: entry.events.length + 1 };
     entry.events.push(stamped);
@@ -159,11 +208,13 @@ chatRouter.post('/chat', requireActive, upload.single('file'), async (req, res) 
   };
   const { emit } = entry;
   activeTurns.set(conversation.id, entry);
+  req.turnStarted = true;
   let turnId;
   try {
     turnId = await startTurn({ account, conversationId: conversation.id, ...request });
   } catch (err) {
     activeTurns.delete(conversation.id);
+    req.releaseTurnSlot();
     throw err;
   }
   entry.turnId = turnId;
@@ -195,6 +246,7 @@ chatRouter.post('/chat', requireActive, upload.single('file'), async (req, res) 
     const connectedAtEnd = entry.listeners.size > 0;
     emit({ type: 'done' }); // ends every attached stream
     activeTurns.delete(conversation.id);
+    req.releaseTurnSlot();
     console.log(`[turn] end id=${turnId} status=${status} ms=${Date.now() - started} reconnects=${entry.reconnects} client=${connectedAtEnd ? 'connected' : 'disconnected'}`);
   }
 });
@@ -217,7 +269,8 @@ function attachStream(entry, res, after) {
   const listener = (event) => {
     if (res.writableEnded) return;
     res.write(`id: ${event.seq}\ndata: ${JSON.stringify(event)}\n\n`);
-    if (event.type === 'done') end();
+    // A reader that stops reading would make the server buffer the whole turn: drop it; it can rejoin.
+    if (event.type === 'done' || res.writableLength > MAX_STREAM_BUFFER_BYTES) end();
   };
   res.on('close', end);
   for (const event of entry.events) if (event.seq > after) listener(event);
@@ -225,13 +278,15 @@ function attachStream(entry, res, after) {
 }
 
 // Rejoin a running turn. 204 = no turn is running any more (reload the conversation instead).
-chatRouter.get('/conversations/:id/stream', requireActive, async (req, res) => {
+chatRouter.get('/conversations/:id/stream', requireActive, rateLimit({ name: 'stream', limit: 120, windowMs: TEN_MINUTES }), async (req, res) => {
   const conversation = await ownConversation(req.account, req.params.id);
   if (!conversation) return res.status(404).json({ error: 'not_found' });
   const entry = activeTurns.get(conversation.id);
   if (!entry) return res.status(204).end();
+  if (entry.listeners.size >= MAX_STREAMS_PER_TURN) return res.status(429).json({ error: 'too_many_streams' });
   entry.reconnects++;
-  attachStream(entry, res, Math.max(0, Number(req.query.after) || 0));
+  const after = Number.parseInt(req.query.after, 10);
+  attachStream(entry, res, Number.isFinite(after) && after > 0 ? after : 0);
 });
 
 // Called on shutdown: warn connected users, give running turns a short grace period,
@@ -247,13 +302,15 @@ export async function drainActiveTurns(timeoutMs) {
   return remaining.length;
 }
 
+const tagitLimit = rateLimit({ name: 'tagit', limit: 120, windowMs: TEN_MINUTES });
+
 // "Show more" on a result card: fetches the next page without spending Claude tokens.
-chatRouter.post('/tagit/sentencing/more', requireActive, async (req, res) => {
+chatRouter.post('/tagit/sentencing/more', requireActive, tagitLimit, async (req, res) => {
   const conversation = await ownConversation(req.account, req.body?.conversationId);
   if (!conversation) return res.status(404).json({ error: 'not_found' });
   const parsed = sentencingParamsSchema.safeParse(req.body?.params);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_params' });
-  const page = Math.max(1, Math.min(Number(req.body?.page) || 2, 50));
+  const page = Math.max(1, Math.min(Number.parseInt(req.body?.page, 10) || 2, 50));
   const turnId = await startTurn({
     account: req.account, conversationId: conversation.id, kind: 'more', text: `${parsed.data.label} · עמוד ${page}`,
   });
@@ -270,29 +327,47 @@ chatRouter.post('/tagit/sentencing/more', requireActive, async (req, res) => {
   }
 });
 
+// Serves a TAG-IT file from our origin without letting upstream decide how the browser treats it:
+// only PDFs are shown inline; anything else is a download. Stream errors and client disconnects are handled.
 async function proxyFile(kind, req, res) {
   const id = Number(req.params.id);
-  if (!Number.isInteger(id)) return res.status(400).json({ error: 'invalid_id' });
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid_id' });
+  const controller = new AbortController();
+  res.on('close', () => controller.abort());
+  let upstream;
   try {
-    const upstream = await tagit.fetchFile(kind, id);
-    await recordTagitCall({ account: req.account, conversationId: null, detail: { action: 'open_file', kind, id } });
-    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${kind}-${id}.pdf"`);
-    Readable.fromWeb(upstream.body).pipe(res);
+    upstream = await tagit.fetchFile(kind, id, { signal: controller.signal });
   } catch (err) {
+    if (controller.signal.aborted) return;
     const status = err instanceof tagit.TagitError && [404, 410].includes(err.status) ? err.status : 502;
-    res.status(status).send(status === 502 ? 'לא ניתן היה לטעון את המסמך מ-TAG-IT.' : 'המסמך אינו זמין.');
+    return res.status(status).type('text/plain').send(status === 502 ? 'לא ניתן היה לטעון את המסמך מ-TAG-IT.' : 'המסמך אינו זמין.');
+  }
+  await recordTagitCall({ account: req.account, conversationId: null, detail: { action: 'open_file', kind, id } }).catch(() => {});
+  const type = (upstream.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  const isPdf = type === 'application/pdf';
+  res.setHeader('Content-Type', isPdf ? 'application/pdf' : 'application/octet-stream');
+  res.setHeader('Content-Disposition', `${isPdf ? 'inline' : 'attachment'}; filename="${kind}-${id}.pdf"`);
+  // The browser's PDF viewer needs a document without the page CSP; framing stays forbidden.
+  res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+  try {
+    await pipeline(Readable.fromWeb(upstream.body), res);
+  } catch (err) {
+    if (!controller.signal.aborted) console.warn('[tagit] file stream failed', err.message);
   }
 }
 
-chatRouter.get('/tagit/rulings/:id/file', requireActive, (req, res) => proxyFile('ruling', req, res));
-chatRouter.get('/tagit/guidelines/:id/file', requireActive, (req, res) => proxyFile('guideline', req, res));
+chatRouter.get('/tagit/rulings/:id/file', requireActive, tagitLimit, (req, res) => proxyFile('ruling', req, res));
+chatRouter.get('/tagit/guidelines/:id/file', requireActive, tagitLimit, (req, res) => proxyFile('guideline', req, res));
 
 export function chatErrorHandler(err, _req, res, next) {
   if (res.headersSent) return next(err);
   if (err instanceof UserFacingError) return res.status(400).json({ error: 'user_error', message: err.message });
-  if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
-    return res.status(413).json({ error: 'user_error', message: `הקובץ גדול מדי (עד ${MAX_UPLOAD_BYTES / 1024 / 1024}MB).` });
+  if (err instanceof multer.MulterError) {
+    const tooLarge = err.code === 'LIMIT_FILE_SIZE';
+    return res.status(tooLarge ? 413 : 400).json({
+      error: 'user_error',
+      message: tooLarge ? `הקובץ גדול מדי (עד ${MAX_UPLOAD_BYTES / 1024 / 1024}MB).` : 'הבקשה חורגת מהמגבלות (גודל או מספר השדות).',
+    });
   }
   console.error('[http] unhandled', err);
   res.status(500).json({ error: 'server_error' });

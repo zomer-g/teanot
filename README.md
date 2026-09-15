@@ -42,6 +42,16 @@ public/                index.html + app.js (צ'ט), admin.html + admin.js (ני�
 - הגופן Heebo מוגש מקומית (`@fontsource-variable/heebo`) — אין פנייה ל-Google Fonts.
 - באנר אדמדם זמני (`.sensitive-banner` ב-`index.html` ו-`admin.html`): המערכת אינה מיועדת לחומר אישי ורגיש. להסרה — למחוק את אלמנט ה-`aside`.
 
+## אבטחה
+
+- **כותרות:** CSP קשיח (`default-src 'none'`, רק משאבים מאותו מקור, ללא `unsafe-inline`), `frame-ancestors 'none'` ו-`X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `nosniff`, COOP/CORP ([src/security.js](src/security.js)).
+- **CSRF:** `xhostd.app` אינו ב-Public Suffix List, ולכן אפליקציות אחרות ב-`*.xhostd.app` הן "same-site". בקשות כתיבה ל-`/api` נחסמות אם `Sec-Fetch-Site` אינו `same-origin` או אם `Origin` זר.
+- **הזדהות:** בפרודקשן חובה `XHOST_AUTH_AUDIENCES` (אין נפילה ל-Host header). חשבון נקשר ל-`sub` הראשון שהתחבר איתו; `email_verified=false` נדחה; עקיפת ה-DEV פועלת רק מקומית (לא עם `DATABASE_URL`/`XHOST_HTTP_PORT`). דף הניהול נמצא ב-`views/` ונגיש רק דרך בדיקת מנהל.
+- **עלות ועומס:** עד 2 בקשות פעילות למשתמש, הגבלות קצב לצ'ט/זרמים/TAG-IT, בדיקת סטטוס ומכסה לפני כל קריאה ל-Claude, מגבלות על כל חלקי ה-multipart.
+- **קבצים:** Word ו-PDF מפוענחים ב-worker thread עם תקרת זיכרון וזמן; בדיקת ה-central directory של ה-zip לפני פריסה; `pdfjs-dist` עדכני עם `isEvalSupported:false` ומגבלת עמודים. קבצים מ-TAG-IT מוגשים inline רק אם הם PDF.
+- **תוכן לא אמין:** פלט המודל עובר DOMPurify עם רשימה מותרת של Markdown בלבד (ללא תמונות, style, טפסים, SVG); קישורים רק http(s); CSV מנטרל נוסחאות.
+- דיווח על בעיית אבטחה: guy@z-g.co.il.
+
 ## עמידות לניתוקים
 
 - בקשה ממשיכה לרוץ בשרת גם אם הדפדפן התנתק (רשת, סגירת לשונית). רק כפתור העצירה (`POST /api/conversations/:id/stop`) עוצר עיבוד.

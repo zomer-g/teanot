@@ -13,6 +13,12 @@ const STATUSES = ['active', 'pending', 'blocked'];
 const PERIODS = ['monthly', 'total'];
 
 const tokenLimit = z.union([z.number().int().min(0).max(2_000_000_000), z.null()]);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const intParam = (value, fallback, min, max) => {
+  const n = Number.parseInt(value, 10);
+  return Number.isFinite(n) ? Math.min(Math.max(n, min), max) : fallback;
+};
 
 function parse(schema, body, res) {
   const result = schema.safeParse(body);
@@ -134,8 +140,8 @@ adminRouter.get('/usage', async (req, res) => {
   if (req.query.from) add('e.created_at >= ?::date', String(req.query.from));
   if (req.query.to) add("e.created_at < (?::date + interval '1 day')", String(req.query.to));
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-  const limit = Math.min(Number(req.query.limit) || 100, 500);
-  const offset = Math.max(Number(req.query.offset) || 0, 0);
+  const limit = intParam(req.query.limit, 100, 1, 500);
+  const offset = intParam(req.query.offset, 0, 0, 10_000_000);
 
   const [events, totals] = await Promise.all([
     query(
@@ -214,20 +220,23 @@ async function listTurns(q, limit, offset) {
 }
 
 adminRouter.get('/turns', async (req, res) => {
-  const limit = Math.min(Number(req.query.limit) || 50, 500);
-  const offset = Math.max(Number(req.query.offset) || 0, 0);
+  const limit = intParam(req.query.limit, 50, 1, 500);
+  const offset = intParam(req.query.offset, 0, 0, 10_000_000);
   res.json({ ...(await listTurns(req.query, limit, offset)), limit, offset });
 });
 
 const REQUEST_KIND_LABELS = { document: 'מסמך', text: 'הודעה', answers: 'תשובה לשאלות', more: 'תוצאות נוספות' };
 
 function requestDescription(t) {
-  if (Array.isArray(t.answers) && t.answers.length) {
-    const answers = t.answers
-      .map((a) => `${a.question}: ${[...(a.selected || []).map((s) => s.label), a.free_text].filter(Boolean).join(', ') || 'ללא העדפה'}`)
-      .join(' | ');
-    return [answers, t.request_text].filter(Boolean).join(' · ');
-  }
+  // Tolerates malformed stored answers so one bad row cannot break the export.
+  const answers = Array.isArray(t.answers)
+    ? t.answers.filter((a) => a && typeof a === 'object').map((a) => {
+      const selected = Array.isArray(a.selected) ? a.selected.map((s) => s?.label) : [];
+      const value = [...selected, a.free_text].filter((x) => typeof x === 'string' && x).join(', ') || 'ללא העדפה';
+      return `${String(a.question ?? '')}: ${value}`;
+    }).join(' | ')
+    : '';
+  if (answers) return [answers, t.request_text].filter(Boolean).join(' · ');
   return [t.file_name, t.request_text].filter(Boolean).join(' · ');
 }
 
@@ -235,7 +244,12 @@ adminRouter.get('/turns.csv', async (req, res) => {
   const { turns } = await listTurns(req.query, 5000, 0);
   const header = ['זמן', 'משתמש', 'סוג בקשה', 'בקשה', 'חיפושים ב-TAG-IT', 'קריאות Claude', 'טוקני קלט', 'טוקני פלט',
     'כתיבה למטמון', 'קריאה ממטמון', 'סה"כ טוקנים', 'עלות משוערת (USD)', 'משך (שניות)', 'סטטוס', 'שגיאה', 'שיחה'];
-  const cell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+  // Quote every cell and neutralise spreadsheet formulas in user-controlled text (CSV injection).
+  const cell = (value) => {
+    let s = String(value ?? '');
+    if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+    return `"${s.replace(/"/g, '""')}"`;
+  };
   const lines = turns.map((t) => [
     new Date(t.started_at).toISOString(), t.user_email, REQUEST_KIND_LABELS[t.request_kind] || t.request_kind, requestDescription(t),
     t.searches.map((s) => [s.action, s.label, s.total ?? s.returned, s.error ? `error: ${s.error}` : null].filter((x) => x != null).join(' ')).join(' | '),
@@ -249,6 +263,7 @@ adminRouter.get('/turns.csv', async (req, res) => {
 });
 
 adminRouter.get('/conversations/:id', async (req, res) => {
+  if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: 'not_found' });
   const conv = await query(
     `SELECT c.id, c.title, c.doc_name, c.analysis, c.created_at, u.email
      FROM conversations c JOIN users u ON u.id = c.user_id WHERE c.id = $1`,

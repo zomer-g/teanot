@@ -9,35 +9,57 @@ const jwks = createRemoteJWKSet(new URL(`${ISSUER}/xhost-auth/jwks`));
 
 const csv = (value) => (value ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 const adminEmails = () => csv(process.env.ADMIN_EMAILS);
+const inProduction = () => process.env.NODE_ENV === 'production';
 
 export const loginUrl = (returnTo = '/') => `/xhost-auth/login?return_to=${encodeURIComponent(returnTo)}`;
 export const logoutUrl = '/xhost-auth/logout?return_to=/';
 
+// Tokens of every xhostd app come from the same issuer, so the audience is what binds a token to this
+// app. Production must name its hostnames explicitly; the Host header is client-controlled.
+export function assertAuthConfig() {
+  if (inProduction() && !csv(process.env.XHOST_AUTH_AUDIENCES).length) {
+    throw new Error('XHOST_AUTH_AUDIENCES must list this app\'s hostnames in production');
+  }
+}
+
+// Local development only: never on xhostd (XHOST_HTTP_PORT) or against a real database.
+function devBypassEmail() {
+  const email = process.env.DEV_AUTH_EMAIL;
+  if (!email || inProduction() || process.env.XHOST_HTTP_PORT || process.env.DATABASE_URL) return null;
+  return email.toLowerCase();
+}
+
 function readCookie(req, name) {
   for (const part of (req.headers.cookie ?? '').split(';')) {
     const [key, ...rest] = part.trim().split('=');
-    if (key === name) return decodeURIComponent(rest.join('='));
+    if (key !== name) continue;
+    try {
+      return decodeURIComponent(rest.join('='));
+    } catch {
+      return null;
+    }
   }
   return null;
 }
 
 async function identify(req) {
-  const devEmail = process.env.DEV_AUTH_EMAIL;
-  if (devEmail && process.env.NODE_ENV !== 'production') {
-    return { sub: `dev:${devEmail}`, email: devEmail.toLowerCase(), name: 'Dev User' };
-  }
+  const devEmail = devBypassEmail();
+  if (devEmail) return { sub: `dev:${devEmail}`, email: devEmail, name: 'Dev User' };
+
   const token = readCookie(req, COOKIE);
   if (!token) return null;
-  // A configured audience list is preferred: the Host header is client-controlled.
-  const audiences = csv(process.env.XHOST_AUTH_AUDIENCES);
+  const configured = csv(process.env.XHOST_AUTH_AUDIENCES);
+  const audience = configured.length ? configured : (inProduction() ? null : req.get('host'));
+  if (!audience) return null;
   try {
     const { payload } = await jwtVerify(token, jwks, {
       issuer: ISSUER,
-      audience: audiences.length ? audiences : req.get('host'),
+      audience,
       algorithms: ['RS256'],
       requiredClaims: ['exp', 'iss', 'aud', 'sub', 'email'],
       clockTolerance: 60,
     });
+    if (payload.email_verified === false) return null;
     return {
       sub: String(payload.sub),
       email: String(payload.email).toLowerCase(),
@@ -59,11 +81,16 @@ async function loadAccount(identity) {
     [identity.email],
   );
   const row = existing.rows[0];
-  const upToDate = row && !row.stale && row.sub === identity.sub
-    && (!isAdmin || (row.role === 'admin' && row.status === 'active'));
-  if (upToDate) {
+  if (row) {
     const { sub, stale, ...account } = row;
-    return account;
+    // An account is bound to the first identity (sub) that signed in with its email. A different identity
+    // presenting the same email is refused rather than silently taking the account over.
+    if (sub && sub !== identity.sub) {
+      console.warn(`[auth] identity mismatch for account ${account.id}; access refused`);
+      return { ...account, status: 'blocked' };
+    }
+    const upToDate = !stale && sub === identity.sub && (!isAdmin || (account.role === 'admin' && account.status === 'active'));
+    if (upToDate) return account;
   }
   const { rows } = await query(
     `INSERT INTO users (email, sub, name, role, status, last_seen_at)
@@ -74,7 +101,7 @@ async function loadAccount(identity) {
        role = CASE WHEN $6::boolean THEN 'admin' ELSE users.role END,
        status = CASE WHEN $6::boolean THEN 'active' ELSE users.status END,
        last_seen_at = now()
-     RETURNING id, email, name, role, status, token_limit, limit_period`,
+     RETURNING ${ACCOUNT_COLUMNS}`,
     [identity.email, identity.sub, identity.name, isAdmin ? 'admin' : 'user', isAdmin ? 'active' : 'pending', isAdmin],
   );
   return rows[0];

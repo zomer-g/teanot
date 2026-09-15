@@ -2,6 +2,7 @@
 // reachable with the configured keys, and does TAG-IT's live schema carry the fields the tools filter on?
 import Anthropic from '@anthropic-ai/sdk';
 import * as tagit from './tagit.js';
+import { probePdfExtraction } from './extract.js';
 
 const EXPECTED_FIELDS = [
   'meta.topics', 'meta.drug_types', 'meta.offense_sections', 'meta.offense_law_sections', 'meta.drug_ordinance_sections',
@@ -23,6 +24,15 @@ export async function runSelfCheck() {
       .map((key) => [key, Boolean(process.env[key])])),
     adminCount: (process.env.ADMIN_EMAILS ?? '').split(',').filter((s) => s.trim()).length,
   };
+
+  report.node = process.version;
+  report.pdfExtraction = await timed(async () => {
+    try {
+      return { ok: true, ...(await probePdfExtraction()) };
+    } catch (err) {
+      return errorInfo(err);
+    }
+  });
 
   const model = process.env.CLAUDE_MODEL || 'claude-opus-5';
   report.anthropic = await timed(async () => {
