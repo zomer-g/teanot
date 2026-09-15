@@ -6,6 +6,7 @@ import { migrate } from './src/migrate.js';
 import { attachUser, requireAdmin } from './src/auth.js';
 import { chatRouter, chatErrorHandler } from './src/routes/chat.js';
 import { adminRouter } from './src/routes/admin.js';
+import { runSelfCheck } from './src/selfcheck.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(root, 'public');
@@ -36,4 +37,8 @@ app.get('/admin', attachUser, (req, res) => {
 app.use(chatErrorHandler);
 
 const port = Number(process.env.XHOST_HTTP_PORT || process.env.PORT || 3000);
-app.listen(port, '0.0.0.0', () => console.log(`[http] listening on ${port}`));
+app.listen(port, '0.0.0.0', () => {
+  console.log(`[http] listening on ${port}`);
+  // Runs after listen so it never delays the health check.
+  if (process.env.SELFCHECK !== 'off') runSelfCheck().catch((err) => console.error('[selfcheck] failed', err));
+});

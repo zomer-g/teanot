@@ -84,6 +84,7 @@ const RESULT_FIELDS = [
 ];
 // Fields the live schema rejected (unknown_field); skipped on later calls.
 const rejectedFields = new Set();
+export const rejectedResultFields = () => [...rejectedFields];
 
 const SORTS = {
   severity: '-meta.severity_score',
