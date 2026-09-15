@@ -556,34 +556,76 @@ async function send({ answers = null, text: presetText = null } = {}) {
   assistant.status('שולח…');
   announce('הבקשה נשלחה ומעובדת. אפשר לעצור בכפתור העצירה.');
   setBusy(true);
-  state.controller = new AbortController();
-  let connectionLost = false;
+  const controller = new AbortController();
+  state.controller = controller;
+  let lastSeq = 0;
+  const onEvent = (event) => {
+    if (event.seq) lastSeq = event.seq;
+    handleEvent(event, assistant);
+  };
+  let outcome; // done | ended | aborted | failed | lost
   try {
-    const res = await fetch('/api/chat', { method: 'POST', body: form, signal: state.controller.signal });
+    const res = await fetch('/api/chat', { method: 'POST', body: form, signal: controller.signal });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       if (res.status === 429 && err.quota) { renderQuota(err.quota); assistant.error('הגעת למגבלת הטוקנים שהוגדרה לחשבונך. ניתן לפנות למנהל המערכת.'); }
       else if (res.status === 409) assistant.error('בקשה קודמת בשיחה זו עדיין בעיבוד.');
       else assistant.error(err.message || 'הבקשה נכשלה. נסו שוב.');
-      return;
+      outcome = 'failed';
+    } else {
+      await readEvents(res, onEvent).catch((err) => { if (controller.signal.aborted) throw err; });
+      outcome = assistant.sawDone ? 'done' : await resumeStream(() => lastSeq, onEvent, assistant, controller.signal);
     }
-    await readEvents(res, (event) => handleEvent(event, assistant));
-    if (!assistant.sawDone) connectionLost = true; // the stream ended without the server's "done"
-    else if (assistant.askedQuestions) announce('התשובה הושלמה, והמערכת שואלת שאלות המשך בסופה.');
-    else announce('התשובה הושלמה.');
-  } catch (err) {
-    if (err.name === 'AbortError') assistant.notice('העיבוד הופסק.');
-    else connectionLost = true;
-  } finally {
-    assistant.finish();
-    setBusy(false);
-    state.controller = null;
-    loadConversations();
+  } catch {
+    outcome = controller.signal.aborted ? 'aborted' : 'lost';
   }
-  if (connectionLost) {
+  if (outcome === 'aborted') assistant.notice('העיבוד הופסק.');
+  assistant.finish();
+  state.controller = null;
+  setBusy(false);
+  loadConversations();
+
+  if (outcome === 'done') {
+    announce(assistant.askedQuestions ? 'התשובה הושלמה, והמערכת שואלת שאלות המשך בסופה.' : 'התשובה הושלמה.');
+  } else if (outcome === 'ended' && state.currentId) {
+    // The turn finished while no stream was attached: show the saved result.
+    const res = await fetch(`/api/conversations/${state.currentId}`).catch(() => null);
+    if (res?.ok) {
+      renderConversation(await res.json());
+      announce('התשובה הושלמה.');
+    }
+  } else if (outcome === 'lost') {
     if (state.currentId) followServerTurn(state.currentId, 'החיבור לשרת נותק, אבל העיבוד ממשיך בשרת. התשובה המלאה תוצג כאן כשתסתיים.');
     else ui.threadInner.append(h('div', { class: 'error-box', role: 'alert', text: 'החיבור לשרת נותק. נסו שוב.' }));
   }
+}
+
+// xhostd's proxy ends a response after about a minute, and a turn can run longer. Rejoin the turn's
+// event stream from the last event received, so the answer keeps streaming without a visible break.
+async function resumeStream(getSeq, onEvent, assistant, signal) {
+  const conversationId = state.currentId;
+  if (!conversationId) return 'lost';
+  let failures = 0;
+  while (!signal.aborted) {
+    const seqBefore = getSeq();
+    let connected = false;
+    try {
+      const res = await fetch(`/api/conversations/${conversationId}/stream?after=${seqBefore}`, { signal });
+      if (res.status === 204) return 'ended';
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      connected = true;
+      failures = 0;
+      await readEvents(res, onEvent);
+    } catch {
+      if (signal.aborted) return 'aborted';
+      if (!connected) failures++;
+    }
+    if (assistant.sawDone) return 'done';
+    if (failures > 6) return 'lost';
+    const idle = connected && getSeq() === seqBefore;
+    if (failures || idle) await new Promise((resolve) => setTimeout(resolve, failures ? Math.min(8000, 500 * 2 ** failures) : 1000));
+  }
+  return 'aborted';
 }
 
 async function readEvents(res, onEvent) {

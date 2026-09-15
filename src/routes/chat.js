@@ -149,11 +149,16 @@ chatRouter.post('/chat', requireActive, upload.single('file'), async (req, res) 
   if (activeTurns.has(conversation.id)) return res.status(409).json({ error: 'turn_in_progress' });
 
   const controller = new AbortController();
-  let clientConnected = true;
-  const emit = (event) => {
-    if (clientConnected && !res.writableEnded) res.write(`data: ${JSON.stringify(event)}\n\n`);
+  // Every event is numbered and kept for the life of the turn, so a browser whose connection was
+  // cut can rejoin with GET /conversations/:id/stream?after=<last seq> and miss nothing.
+  const entry = { controller, turnId: null, events: [], listeners: new Set(), reconnects: 0 };
+  entry.emit = (event) => {
+    const stamped = { ...event, seq: entry.events.length + 1 };
+    entry.events.push(stamped);
+    for (const listener of [...entry.listeners]) listener(stamped);
   };
-  activeTurns.set(conversation.id, { controller, turnId: null, emit });
+  const { emit } = entry;
+  activeTurns.set(conversation.id, entry);
   let turnId;
   try {
     turnId = await startTurn({ account, conversationId: conversation.id, ...request });
@@ -161,16 +166,8 @@ chatRouter.post('/chat', requireActive, upload.single('file'), async (req, res) 
     activeTurns.delete(conversation.id);
     throw err;
   }
-  activeTurns.get(conversation.id).turnId = turnId;
-
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream; charset=utf-8',
-    'Cache-Control': 'no-cache, no-transform',
-    Connection: 'keep-alive',
-    'X-Accel-Buffering': 'no',
-  });
-  const heartbeat = setInterval(() => { if (clientConnected && !res.writableEnded) res.write(': ping\n\n'); }, 15000);
-  res.on('close', () => { if (!res.writableEnded) clientConnected = false; });
+  entry.turnId = turnId;
+  attachStream(entry, res, 0);
 
   const started = Date.now();
   console.log(`[turn] start id=${turnId} user=${account.id} conversation=${conversation.id} kind=${request.kind}`);
@@ -189,18 +186,52 @@ chatRouter.post('/chat', requireActive, upload.single('file'), async (req, res) 
       emit({ type: 'error', message: errorMessage(err) });
     }
   } finally {
-    clearInterval(heartbeat);
-    activeTurns.delete(conversation.id);
     await finishTurn(turnId, status, errorText).catch((err) => console.error('[turn] finish failed', err));
-    console.log(`[turn] end id=${turnId} status=${status} ms=${Date.now() - started} client=${clientConnected ? 'connected' : 'disconnected'}`);
     try {
       emit({ type: 'quota', quota: await getQuota(account) });
     } catch (err) {
       console.error('[turn] quota read failed', err);
     }
-    emit({ type: 'done' });
-    res.end();
+    const connectedAtEnd = entry.listeners.size > 0;
+    emit({ type: 'done' }); // ends every attached stream
+    activeTurns.delete(conversation.id);
+    console.log(`[turn] end id=${turnId} status=${status} ms=${Date.now() - started} reconnects=${entry.reconnects} client=${connectedAtEnd ? 'connected' : 'disconnected'}`);
   }
+});
+
+// Streams a turn's events to one HTTP response: replays everything after `after`, then follows live
+// until "done". xhostd's proxy ends a response after about a minute, which is why browsers rejoin.
+function attachStream(entry, res, after) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  const heartbeat = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n'); }, 15000);
+  const end = () => {
+    clearInterval(heartbeat);
+    entry.listeners.delete(listener);
+    if (!res.writableEnded) res.end();
+  };
+  const listener = (event) => {
+    if (res.writableEnded) return;
+    res.write(`id: ${event.seq}\ndata: ${JSON.stringify(event)}\n\n`);
+    if (event.type === 'done') end();
+  };
+  res.on('close', end);
+  for (const event of entry.events) if (event.seq > after) listener(event);
+  if (!res.writableEnded) entry.listeners.add(listener);
+}
+
+// Rejoin a running turn. 204 = no turn is running any more (reload the conversation instead).
+chatRouter.get('/conversations/:id/stream', requireActive, async (req, res) => {
+  const conversation = await ownConversation(req.account, req.params.id);
+  if (!conversation) return res.status(404).json({ error: 'not_found' });
+  const entry = activeTurns.get(conversation.id);
+  if (!entry) return res.status(204).end();
+  entry.reconnects++;
+  attachStream(entry, res, Math.max(0, Number(req.query.after) || 0));
 });
 
 // Called on shutdown: warn connected users, give running turns a short grace period,
