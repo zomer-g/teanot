@@ -55,6 +55,36 @@ function decorateLinks(container) {
   });
 }
 
+// Tables stay tables on wide screens and become one card per row on phones (see .stack-table).
+// Explicit roles keep the table semantics that display:block would otherwise drop for screen readers.
+function stackableTable(table, label) {
+  table.classList.add('stack-table');
+  table.setAttribute('role', 'table');
+  const headers = [...(table.tHead?.rows[0]?.cells ?? [])].map((cell) => cell.textContent.trim());
+  for (const section of [table.tHead, ...table.tBodies]) section?.setAttribute('role', 'rowgroup');
+  for (const row of table.rows) {
+    row.setAttribute('role', 'row');
+    [...row.cells].forEach((cell, i) => {
+      if (cell.tagName === 'TH') cell.setAttribute('role', 'columnheader');
+      else {
+        cell.setAttribute('role', 'cell');
+        if (headers[i]) cell.dataset.label = headers[i];
+      }
+    });
+  }
+  const wrap = h('div', { class: 'table-scroll', role: 'region', 'aria-label': label, tabindex: '0' });
+  table.replaceWith(wrap);
+  wrap.append(table);
+  return wrap;
+}
+
+function enhanceTables(container) {
+  container.querySelectorAll('table:not(.stack-table)').forEach((table) => {
+    table.classList.add('md-table');
+    stackableTable(table, 'טבלה');
+  });
+}
+
 const svg = (inner) =>
   `<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
 const ICONS = {
@@ -213,7 +243,8 @@ function renderApp() {
       composerError,
       dropTarget,
       h('p', { class: 'composer-foot' },
-        'התוצאות מבוססות על מאגר TAG-IT ומיועדות לסיוע במחקר משפטי. יש לבדוק כל תוצאה מול המקור. ',
+        h('span', { class: 'foot-long', text: 'התוצאות מבוססות על מאגר TAG-IT ומיועדות לסיוע במחקר משפטי. יש לבדוק כל תוצאה מול המקור. ' }),
+        h('span', { class: 'foot-short', text: 'לסיוע במחקר בלבד; יש לבדוק מול המקור. ' }),
         h('a', { href: '/accessibility', text: 'הצהרת נגישות' }), ' · ', h('a', { href: '/privacy', text: 'מדיניות פרטיות' }))));
 
   const main = h('main', { class: 'main', id: 'content', tabindex: '-1' },
@@ -291,7 +322,7 @@ function showWelcome() {
   ui.threadInner.replaceChildren(h('div', { class: 'welcome' },
     h('div', { class: 'gold-bar' }),
     h('h2', { text: 'איתור גזרי דין והנחיות לפי כתב אישום או הכרעת דין' }),
-    h('p', { text: 'צרפו קובץ Word או PDF, או הדביקו את נוסח המסמך. המערכת תזהה את סעיפי האישום או ההרשעה של כל נאשם ותאתר גזרי דין או הנחיות רלוונטיים ממאגר TAG-IT.' }),
+    h('p', { text: 'צרפו קובץ Word או PDF, או הדביקו את נוסח המסמך. המערכת תזהה את סעיפי האישום או ההרשעה של כל נאשם ותאתר גזרי דין או הנחיות רלוונטיים ממאגר TAG‑IT.' }),
     h('ol', { class: 'steps' },
       step('1', 'צירוף המסמך', 'כתב אישום או הכרעת דין, כקובץ או כטקסט.'),
       step('2', 'זיהוי העבירות', 'סעיפים ונתונים מהותיים לכל נאשם, כמו סוג הסם וכמותו.'),
@@ -724,13 +755,14 @@ function createAssistantBlock(conversationId) {
         renderPending = true;
         requestAnimationFrame(() => {
           renderPending = false;
-          if (textEl) { textEl.innerHTML = markdown(textBuffer); scrollToBottom(); }
+          if (textEl) { textEl.innerHTML = markdown(textBuffer); enhanceTables(textEl); scrollToBottom(); }
         });
       }
     },
     endSegment() {
       if (textEl) {
         textEl.innerHTML = markdown(textBuffer);
+        enhanceTables(textEl);
         decorateLinks(textEl);
         textEl.classList.remove('cursor');
       }
@@ -767,6 +799,7 @@ function createAssistantBlock(conversationId) {
       let el = null;
       if (item.type === 'text') {
         el = h('div', { class: 'assistant-text', svg: markdown(item.text) });
+        enhanceTables(el);
         decorateLinks(el);
       } else if (item.type === 'analysis') {
         el = renderAnalysis(item.data);
@@ -819,17 +852,17 @@ function renderAnalysis(a) {
       h('div', { class: 'defendant-head' },
         h('h4', { style: 'margin:0;font-size:inherit', text: label }),
         h('span', { class: 'badge badge-muted', text: d.counts.length === 1 ? 'סעיף אחד' : `${d.counts.length} סעיפים` })),
-      h('div', { class: 'table-scroll', role: 'region', 'aria-label': `סעיפים של ${label}`, tabindex: '0' },
-        h('table', { class: 'charges' },
-          h('caption', { class: 'sr-only', text: `סעיפים של ${label}` }),
-          h('thead', {}, h('tr', {}, ['עבירה', 'חוק וסעיף', 'סטטוס', 'נתונים'].map((t) => h('th', { scope: 'col', text: t })))),
-          h('tbody', {}, d.counts.map((c) => h('tr', {},
-            h('td', { text: c.offense + (c.occurrences > 1 ? ` (${c.occurrences} עבירות)` : '') }),
-            h('td', {}, h('div', { class: 'charge-section', text: c.section || '—' }), c.law ? h('div', { class: 'small muted', text: c.law }) : null),
-            h('td', {}, h('span', { class: `badge ${c.status === 'acquitted' ? 'badge-muted' : c.status === 'convicted' ? 'badge-navy' : ''}`, text: COUNT_STATUS[c.status] || c.status })),
-            h('td', {}, h('div', { class: 'facts' },
-              (c.drugs || []).map((drug) => h('span', { class: 'badge badge-gold', text: [drug.name, drug.amount != null ? fmtNumber(drug.amount) : null, drug.unit === 'grams' ? 'גרם' : drug.unit_label].filter(Boolean).join(' ') })),
-              (c.facts || []).map((f) => h('span', { class: 'badge', text: `${f.label}: ${f.value}` }))))))))));
+      stackableTable(h('table', { class: 'charges' },
+        h('caption', { class: 'sr-only', text: `סעיפים של ${label}` }),
+        h('thead', {}, h('tr', {}, ['עבירה', 'חוק וסעיף', 'סטטוס', 'נתונים'].map((t) => h('th', { scope: 'col', text: t })))),
+        h('tbody', {}, d.counts.map((c) => h('tr', {},
+          h('td', { class: 'cell-offense', text: c.offense + (c.occurrences > 1 ? ` (${c.occurrences} עבירות)` : '') }),
+          h('td', { class: 'cell-law' }, h('div', { class: 'charge-section', text: c.section || '—' }), c.law ? h('div', { class: 'small muted', text: c.law }) : null),
+          h('td', { class: 'cell-status' }, h('span', { class: `badge ${c.status === 'acquitted' ? 'badge-muted' : c.status === 'convicted' ? 'badge-navy' : ''}`, text: COUNT_STATUS[c.status] || c.status })),
+          h('td', { class: 'cell-facts' },
+            c.drugs?.length ? h('div', { class: 'facts' }, c.drugs.map((drug) => h('span', { class: 'badge badge-gold', text: [drug.name, drug.amount != null ? fmtNumber(drug.amount) : null, drug.unit === 'grams' ? 'גרם' : drug.unit_label].filter(Boolean).join(' ') }))) : null,
+            c.facts?.length ? h('ul', { class: 'fact-list' }, c.facts.map((f) => h('li', {}, h('span', { class: 'fact-label', text: `${f.label}: ` }), f.value))) : null,
+            !c.drugs?.length && !c.facts?.length ? h('span', { class: 'muted', text: '—' }) : null))))), `סעיפים של ${label}`));
   });
 
   return h('section', { class: 'card analysis', 'aria-labelledby': headingId },

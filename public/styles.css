@@ -67,6 +67,7 @@ a:hover { color: var(--accent-text); }
   padding: 8px 20px; font-size: 14px; line-height: 1.6; text-align: center;
 }
 .sensitive-banner strong { font-weight: 700; }
+.banner-short, .foot-short { display: none; }
 
 /* ---------- Buttons & inputs ---------- */
 .btn {
@@ -173,7 +174,10 @@ body.app-page #root { flex: 1; min-height: 0; display: flex; flex-direction: col
 .thread { flex: 1; min-height: 0; overflow-y: auto; scroll-behavior: smooth; }
 .thread:focus { outline: none; }
 .thread:focus-visible { outline: 3px solid var(--primary-dark); outline-offset: -3px; box-shadow: none; }
-.thread-inner { max-width: 860px; margin: 0 auto; padding: 24px 20px 40px; }
+.thread-inner { max-width: 1280px; margin: 0 auto; padding: 24px 20px 40px; }
+.welcome, .questions, .msg-user .msg-body { max-width: 860px; }
+.welcome { margin-inline: auto; }
+.assistant-text > :not(.table-scroll) { max-width: 820px; }
 
 /* Empty state */
 .welcome { text-align: center; padding: 40px 12px 8px; }
@@ -194,7 +198,7 @@ body.app-page #root { flex: 1; min-height: 0; display: flex; flex-direction: col
 .msg-user { justify-content: flex-start; flex-direction: row-reverse; }
 .msg-avatar { width: 34px; height: 34px; flex-shrink: 0; border-radius: 8px; }
 .msg-body { min-width: 0; max-width: 100%; flex: 1; }
-.msg-user .msg-body { flex: 0 1 auto; max-width: 80%; }
+.msg-user .msg-body { flex: 0 1 auto; width: fit-content; max-width: min(80%, 720px); }
 .bubble-user {
   background: var(--primary); color: #fff; border-radius: 16px; border-end-end-radius: 4px; padding: 10px 16px;
   white-space: pre-wrap; overflow-wrap: anywhere;
@@ -209,7 +213,9 @@ body.app-page #root { flex: 1; min-height: 0; display: flex; flex-direction: col
 .assistant-text ul, .assistant-text ol { margin: 0 0 10px; padding-inline-start: 22px; }
 .assistant-text h1, .assistant-text h2, .assistant-text h3, .assistant-text h4 { color: var(--primary-dark); margin: 14px 0 6px; font-size: 17px; }
 .assistant-text strong { color: var(--primary-dark); }
-.assistant-text table { border-collapse: collapse; margin: 8px 0 12px; font-size: 14px; display: block; overflow-x: auto; }
+.assistant-text .table-scroll { margin: 8px 0 12px; }
+.md-table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.6; }
+.md-table td { vertical-align: top; }
 .assistant-text th, .assistant-text td { border: 1px solid var(--border-control); padding: 4px 10px; text-align: start; }
 .assistant-text th { background: var(--muted-bg); }
 .assistant-text blockquote { margin: 8px 0; padding: 4px 14px; border-inline-start: 4px solid var(--accent); color: var(--muted); }
@@ -246,9 +252,17 @@ body.app-page #root { flex: 1; min-height: 0; display: flex; flex-direction: col
 .charges th { text-align: start; font-size: 12px; font-weight: 600; color: var(--muted); padding: 6px 12px; border-bottom: 1px solid var(--border); }
 .charges td { padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
 .charges tr:last-child td { border-bottom: 0; }
-.charge-section { font-weight: 600; color: var(--primary); white-space: nowrap; }
-.facts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-.table-scroll { overflow-x: auto; }
+.charge-section { font-weight: 600; color: var(--primary); }
+.charges .cell-offense { width: 22%; min-width: 9em; font-weight: 600; }
+.charges .cell-law { width: 22%; min-width: 9em; }
+.charges .cell-status { width: 1%; white-space: nowrap; }
+.fact-list { list-style: none; margin: 4px 0 0; padding: 0; line-height: 1.6; }
+.fact-list li + li { margin-top: 2px; }
+.fact-label { font-weight: 600; color: var(--primary-dark); }
+.facts { display: flex; flex-wrap: wrap; gap: 4px; }
+/* position: relative keeps absolutely positioned descendants (screen-reader text) inside the scroll box,
+   so a wide table cannot stretch the whole page on a phone. */
+.table-scroll { overflow-x: auto; position: relative; }
 
 /* Mode picker (card-style answers) */
 .mode-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
@@ -314,7 +328,7 @@ body.app-page #root { flex: 1; min-height: 0; display: flex; flex-direction: col
 
 /* Composer */
 .composer-wrap { border-top: 1px solid var(--border); background: #fff; padding: 12px 20px 10px; flex-shrink: 0; }
-.composer { max-width: 860px; margin: 0 auto; }
+.composer { max-width: 900px; margin: 0 auto; }
 .drop-target { border: 1px solid var(--border-control); border-radius: 16px; background: #fff; transition: border-color .2s, box-shadow .2s; }
 .drop-target:focus-within { border-color: var(--primary-dark); outline: 3px solid var(--primary-dark); outline-offset: 2px; }
 .drop-target.dragging { border: 2px dashed var(--primary); background: #fbf7ea; }
@@ -425,15 +439,65 @@ body.app-page #root { flex: 1; min-height: 0; display: flex; flex-direction: col
   .welcome h2 { font-size: 24px; }
   .sensitive-banner { font-size: 13px; padding: 6px 14px; text-align: start; }
 }
+@media (max-width: 640px) {
+  :root { --header-h: 52px; }
+  .app-header { padding: 0 12px; gap: 8px; }
+  .logo { gap: 8px; }
+  .logo img { width: 28px; height: 28px; }
+  .logo-text { font-size: 20px; }
+  .banner-long, .foot-long { display: none; }
+  .banner-short, .foot-short { display: inline; }
+  .sensitive-banner { font-size: 12.5px; line-height: 1.5; padding: 5px 12px; }
+
+  .thread-inner { padding: 14px 12px 28px; }
+  .msg { gap: 0; margin: 14px 0; }
+  .msg-avatar { display: none; }
+  .msg-user .msg-body { max-width: 88%; }
+  .assistant-text { font-size: 15.5px; line-height: 1.75; }
+  .welcome { padding: 18px 4px 4px; }
+  .welcome h2 { font-size: 22px; }
+  .welcome p { font-size: 15px; }
+  .steps { margin: 18px 0 4px; gap: 8px; }
+  .step { padding: 12px 14px; }
+
+  .card-head { padding: 10px 12px; }
+  .card-body { padding: 12px; }
+  .questions { padding: 12px 14px; }
+  .result { padding: 12px; gap: 8px; }
+  .defendant-head { padding: 8px 10px; }
+
+  /* One card per table row: a label beside each value, no sideways scrolling. */
+  .stack-table, .stack-table tbody, .stack-table tr, .stack-table td { display: block; width: auto; min-width: 0; }
+  .stack-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .stack-table tr { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  .stack-table tr:last-child { border-bottom: 0; }
+  .stack-table td, .assistant-text .stack-table td { border: 0; padding: 2px 0; display: grid; grid-template-columns: 5.5em minmax(0, 1fr); gap: 8px; align-items: baseline; }
+  .stack-table td::before { content: attr(data-label); font-size: 12px; font-weight: 600; color: var(--muted); }
+  .stack-table td:first-child { display: block; font-size: 15px; font-weight: 700; color: var(--primary-dark); padding-bottom: 4px; }
+  .stack-table td:first-child::before { content: none; }
+  .charges .cell-offense, .charges .cell-law, .charges .cell-status { width: auto; min-width: 0; white-space: normal; }
+  .stack-table td > * { justify-self: start; min-width: 0; }
+  /* Facts run long: give them the full card width under their label. */
+  .charges .cell-facts { display: block; padding-top: 4px; }
+  .charges .cell-facts::before { display: block; margin-bottom: 2px; }
+  .md-table { border: 1px solid var(--border-control); border-radius: var(--radius-lg); }
+  .assistant-text .md-table tr:nth-child(even) { background: #fafbfc; }
+
+  .composer-wrap { padding: 8px 10px 6px; }
+  .composer-row { padding: 4px; }
+  .composer textarea { max-height: 160px; padding: 8px 4px; }
+  .composer-foot { font-size: 11.5px; margin-top: 4px; }
+
+  .admin-wrap { padding: 16px 12px 40px; }
+  .admin-hero h1 { font-size: 24px; }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .stat { padding: 10px 12px; }
+  .stat dd { font-size: 20px; }
+}
 @media (max-width: 420px) {
   .app-header { padding: 0 10px; gap: 6px; }
-  .logo { gap: 8px; }
-  .logo img { width: 30px; height: 30px; }
-  .logo-text { font-size: 20px; }
   .header-actions { gap: 4px; }
   .header-actions .btn-sm { padding: 4px 8px; }
-  .thread-inner { padding-inline: 12px; }
-  .composer-wrap { padding-inline: 10px; }
   .doc-wrap h1 { font-size: 26px; }
 }
 /* Short viewports (landscape phones, heavy zoom): let the page scroll as a whole so nothing is cut off. */
