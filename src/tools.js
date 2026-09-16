@@ -310,11 +310,15 @@ export async function executeTool(toolUse, ctx) {
         const facetKey = GUIDELINE_FACETS[field];
         if (facetKey) {
           const facets = await tagit.getGuidelinesFacets({ signal });
-          const values = facets[facetKey].filter((v) => !contains || v.value.includes(contains)).slice(0, 120);
+          const matched = facets[facetKey].filter((v) => !contains || v.value.includes(contains));
+          const values = matched.slice(0, 250);
           activity(label, 'done');
           return {
             block: toolResult(toolUse, {
               key: field,
+              matched: matched.length,
+              // Say so rather than letting the model infer a cut from where the list stops.
+              truncated: matched.length > values.length,
               // The filter is a substring match while the count is exact, so the count is a floor.
               note: 'Copy a value exactly as written. count is how many documents hold that exact value; the filter matches substrings, so it can return more.',
               values,
