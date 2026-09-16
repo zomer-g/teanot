@@ -257,7 +257,8 @@ async function guidelinesRequest(path, params, options) {
       guidelinesKeyInUse = name;
       return result;
     } catch (err) {
-      if (!(err instanceof TagitError) || err.status !== 401) throw err;
+      // 401 = wrong key; 403 = the key lacks the scope. Either way another configured key may work.
+      if (!(err instanceof TagitError) || ![401, 403].includes(err.status)) throw err;
       lastError = err;
     }
   }
