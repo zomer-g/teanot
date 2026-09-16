@@ -102,8 +102,11 @@ export const guidelinesParamsSchema = z.object({
   limit: z.number().int().min(1).max(25).default(15),
 });
 
+// Guideline facets live behind the same tool: one discovery path for the model, two sources upstream.
+const GUIDELINE_FACETS = { 'guidelines.topic': 'topics', 'guidelines.source': 'sources' };
+
 const fieldValuesSchema = z.object({
-  field: text.describe('A meta.* field key, e.g. "meta.topics", "meta.offense_laws", "meta.offense_law_sections"'),
+  field: text.describe('A meta.* field key for sentencing decisions, e.g. "meta.topics", "meta.offense_laws", "meta.offense_law_sections"; or "guidelines.topic" / "guidelines.source" for the guideline fields'),
   contains: optText.describe('Only return values containing this substring'),
 });
 
@@ -304,6 +307,21 @@ export async function executeTool(toolUse, ctx) {
       const label = `בודק ערכים בשדה ${field}`;
       activity(label, 'running');
       try {
+        const facetKey = GUIDELINE_FACETS[field];
+        if (facetKey) {
+          const facets = await tagit.getGuidelinesFacets({ signal });
+          const values = facets[facetKey].filter((v) => !contains || v.value.includes(contains)).slice(0, 120);
+          activity(label, 'done');
+          return {
+            block: toolResult(toolUse, {
+              key: field,
+              // The filter is a substring match while the count is exact, so the count is a floor.
+              note: 'Copy a value exactly as written. count is how many documents hold that exact value; the filter matches substrings, so it can return more.',
+              values,
+            }),
+            ui: null,
+          };
+        }
         const schema = await tagit.getSentencingSchema({ signal });
         const def = (schema.fields ?? []).find((f) => f.key === field);
         activity(label, 'done');
@@ -311,7 +329,10 @@ export async function executeTool(toolUse, ctx) {
           return {
             block: toolResult(toolUse, {
               error: 'unknown_field',
-              available_fields: (schema.fields ?? []).filter((f) => f.key.startsWith('meta.')).map((f) => ({ key: f.key, label: f.label, type: f.type })),
+              available_fields: [
+                ...(schema.fields ?? []).filter((f) => f.key.startsWith('meta.')).map((f) => ({ key: f.key, label: f.label, type: f.type })),
+                ...Object.keys(GUIDELINE_FACETS).map((key) => ({ key, label: 'שדה של הנחיות', type: 'string' })),
+              ],
             }, true),
             ui: null,
           };
