@@ -101,20 +101,6 @@ export async function runSelfCheck() {
     }
   });
 
-  report.tagitGuidelineFacets = await timed(async () => {
-    try {
-      const facets = await tagit.getGuidelinesFacets();
-      return {
-        ok: true,
-        sources: facets.sources.length,
-        topics: facets.topics.length,
-        sourceSample: facets.sources.slice(0, 5).map((f) => f.value),
-      };
-    } catch (err) {
-      return errorInfo(err);
-    }
-  });
-
   // Paired A/B of the guidelines list endpoint, for TAG-IT performance work (SELFCHECK_GUIDELINES_AB=1).
   // Order exact, skip, skip, exact cancels cache warming and slow drift, which single samples taken
   // hours apart cannot: the upstream database is shared with other heavy queries.

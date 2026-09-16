@@ -306,22 +306,6 @@ export async function searchGuidelines(p, { signal } = {}) {
   };
 }
 
-// Distinct topic / source_label values, so the model picks a stored value instead of guessing one.
-// The endpoint is cached upstream and tells us for how long; mirror that rather than hammering it.
-let facetsCache = { at: 0, ttlMs: 0, data: null };
-
-export async function getGuidelinesFacets({ signal } = {}) {
-  if (facetsCache.data && Date.now() - facetsCache.at < facetsCache.ttlMs) return facetsCache.data;
-  const raw = await guidelinesRequest('/api/public/over-guidelines/facets', {}, { signal });
-  const list = (values) => arr(values)
-    .map((v) => (typeof v === 'string' ? { value: v, count: null } : { value: v?.value ?? null, count: num(v?.count) }))
-    .filter((v) => typeof v.value === 'string' && v.value);
-  const data = { sources: list(raw?.sources), topics: list(raw?.topics) };
-  const ttlSeconds = num(raw?.cached_for_seconds) ?? 3600;
-  facetsCache = { at: Date.now(), ttlMs: Math.min(Math.max(ttlSeconds, 60), 86_400) * 1000, data };
-  return data;
-}
-
 export async function readGuideline(id, { signal } = {}) {
   return guidelinesRequest(`/api/public/over-guidelines/documents/${encodeURIComponent(id)}`, {}, { signal });
 }
