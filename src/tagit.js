@@ -285,8 +285,10 @@ export function normalizeGuideline(g) {
 export async function searchGuidelines(p, { signal } = {}) {
   const queries = p.queries?.length ? p.queries : [null];
   const lists = await Promise.all(queries.map((q) =>
+    // total_mode=skip: the exact count costs a second full scan upstream (~27 s on a broad query)
+    // and we only show the cards, so the count comes back null.
     guidelinesRequest('/api/public/over-guidelines/documents', {
-      q, topic: p.topic, source: p.source, limit: p.limit ?? 15, skip: 0,
+      q, topic: p.topic, source: p.source, limit: p.limit ?? 15, skip: 0, total_mode: 'skip',
     }, { signal })));
   const byId = new Map();
   lists.forEach((list, i) => {
