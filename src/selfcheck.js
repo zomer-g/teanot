@@ -101,5 +101,26 @@ export async function runSelfCheck() {
     }
   });
 
+  // Paired A/B of the guidelines list endpoint, for TAG-IT performance work (SELFCHECK_GUIDELINES_AB=1).
+  // Order exact, skip, skip, exact cancels cache warming and slow drift, which single samples taken
+  // hours apart cannot: the upstream database is shared with other heavy queries.
+  if (process.env.SELFCHECK_GUIDELINES_AB === '1') {
+    const runs = [];
+    for (const totalMode of ['exact', 'skip', 'skip', 'exact']) {
+      const started = Date.now();
+      try {
+        const result = await tagit.searchGuidelines({ queries: ['סמים'], limit: 3, totalMode });
+        runs.push({ totalMode, ms: Date.now() - started, total: result.totals[0]?.total ?? null, returned: result.items.length });
+      } catch (err) {
+        runs.push({ totalMode, ms: Date.now() - started, error: String(err.message).slice(0, 120) });
+      }
+    }
+    const average = (mode) => {
+      const samples = runs.filter((r) => r.totalMode === mode && !r.error).map((r) => r.ms);
+      return samples.length ? Math.round(samples.reduce((a, b) => a + b, 0) / samples.length) : null;
+    };
+    report.guidelinesAb = { query: 'סמים', limit: 3, runs, exactAvgMs: average('exact'), skipAvgMs: average('skip') };
+  }
+
   console.log('[selfcheck]', JSON.stringify(report));
 }

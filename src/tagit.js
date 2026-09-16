@@ -288,7 +288,8 @@ export async function searchGuidelines(p, { signal } = {}) {
     // total_mode=skip: the exact count costs a second full scan upstream (~27 s on a broad query)
     // and we only show the cards, so the count comes back null.
     guidelinesRequest('/api/public/over-guidelines/documents', {
-      q, topic: p.topic, source: p.source, limit: p.limit ?? 15, skip: 0, total_mode: 'skip',
+      q, topic: p.topic, source: p.source, limit: p.limit ?? 15, skip: 0,
+      total_mode: p.totalMode === 'exact' ? 'exact' : 'skip', // exact only for the boot A/B measurement
     }, { signal })));
   const byId = new Map();
   lists.forEach((list, i) => {
