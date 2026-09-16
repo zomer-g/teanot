@@ -4,10 +4,10 @@ import { pipeline } from 'node:stream/promises';
 import { Router } from 'express';
 import multer from 'multer';
 import { z } from 'zod';
-import Anthropic from '@anthropic-ai/sdk';
 import { query } from '../db.js';
 import { loginUrl, logoutUrl, requireActive } from '../auth.js';
 import { documentBlock, documentFromText, extractDocument, MAX_UPLOAD_BYTES, UserFacingError } from '../extract.js';
+import { ModelConfigError } from '../llm/index.js';
 import { QuotaExceededError, assertQuota, getQuota, recordTagitCall } from '../usage.js';
 import { finishTurn, lastTurn, startTurn } from '../turns.js';
 import { rateLimit } from '../security.js';
@@ -126,13 +126,15 @@ chatRouter.post('/conversations/:id/stop', requireActive, async (req, res) => {
   res.json({ stopped: Boolean(active) });
 });
 
-// User-facing messages stay generic; details go to the server log.
+// User-facing messages stay generic; details go to the server log. Every provider SDK reports an HTTP status.
 function errorMessage(err) {
-  if (err instanceof Anthropic.RateLimitError) return 'שירות הבינה המלאכותית עמוס כרגע. נסו שוב בעוד דקה.';
-  if (err instanceof Anthropic.AuthenticationError) return 'מפתח ה-API של Anthropic אינו תקין. יש לפנות למנהל המערכת.';
-  if (err instanceof Anthropic.BadRequestError) return 'שירות הבינה המלאכותית דחה את הבקשה. אם צורף מסמך גדול במיוחד, נסו לצרף רק את החלק הרלוונטי.';
-  if (err instanceof Anthropic.APIError) return 'שירות הבינה המלאכותית החזיר שגיאה. נסו שוב.';
-  if (err instanceof Anthropic.AnthropicError && /authentication/i.test(err.message)) return 'מפתח ה-API של Anthropic לא הוגדר בשרת. יש לפנות למנהל המערכת.';
+  if (err instanceof ModelConfigError) return 'לא הוגדר מודל שפה פעיל או מפתח API עבורו. יש לפנות למנהל המערכת.';
+  const status = Number(err?.status);
+  if (status === 429) return 'שירות מודל השפה עמוס כרגע. נסו שוב בעוד דקה.';
+  if (status === 401 || status === 403) return 'מפתח ה-API של שירות מודל השפה אינו תקין. יש לפנות למנהל המערכת.';
+  if (status === 404) return 'המודל שנבחר אינו זמין אצל הספק. יש לפנות למנהל המערכת.';
+  if (status === 400 || status === 413) return 'שירות מודל השפה דחה את הבקשה. אם צורף מסמך גדול במיוחד, נסו לצרף רק את החלק הרלוונטי.';
+  if (status >= 500) return 'שירות מודל השפה החזיר שגיאה. נסו שוב.';
   return 'אירעה שגיאה בעיבוד הבקשה. נסו שוב.';
 }
 
@@ -304,7 +306,7 @@ export async function drainActiveTurns(timeoutMs) {
 
 const tagitLimit = rateLimit({ name: 'tagit', limit: 120, windowMs: TEN_MINUTES });
 
-// "Show more" on a result card: fetches the next page without spending Claude tokens.
+// "Show more" on a result card: fetches the next page without spending model tokens.
 chatRouter.post('/tagit/sentencing/more', requireActive, tagitLimit, async (req, res) => {
   const conversation = await ownConversation(req.account, req.body?.conversationId);
   if (!conversation) return res.status(404).json({ error: 'not_found' });

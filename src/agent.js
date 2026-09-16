@@ -1,16 +1,10 @@
-// One conversation turn: replay history, stream Claude, run tools, persist everything, record usage.
-import Anthropic from '@anthropic-ai/sdk';
+// One conversation turn: replay history, stream the language model, run tools, persist everything, record usage.
 import { query } from './db.js';
-import { getQuota, recordClaudeUsage } from './usage.js';
+import { activeModel, streamModel } from './llm/index.js';
+import { getQuota, recordModelUsage } from './usage.js';
 import { TOOLS, askUserSchema, executeTool, validationError } from './tools.js';
 
-const MODEL = process.env.CLAUDE_MODEL || 'claude-opus-5';
-const EFFORT = process.env.CLAUDE_EFFORT || 'high';
-const USE_FALLBACKS = process.env.CLAUDE_FALLBACKS !== 'off';
 const MAX_ITERATIONS = 12;
-
-let client = null;
-const anthropic = () => (client ??= new Anthropic());
 
 export const SYSTEM_PROMPT = `You are the research assistant of the Zomer law office (עו"ד גיא זומר), used by Israeli criminal lawyers. Users give you an indictment (כתב אישום) or a verdict (הכרעת דין), as pasted text or an attached Word/PDF file. You find comparable sentencing decisions (גזרי דין) or guidelines (הנחיות) in the TAG-IT database and help the lawyer work with them. Always write to the user in Hebrew.
 
@@ -80,6 +74,9 @@ function pendingToolResults(history, answers) {
 
 // Returns how the turn ended: completed | awaiting_input | quota_exceeded | refused | truncated | iteration_limit.
 export async function runTurn({ account, conversationId, turnId, userBlocks, userUi, answers, emit, signal }) {
+  // Resolved once per turn and before anything is saved: a missing key fails the request cleanly, and an admin
+  // switching models mid-turn does not split one answer across two models.
+  const llm = await activeModel();
   const history = await loadHistory(conversationId);
   const userContent = [...pendingToolResults(history, answers), ...userBlocks];
   if (!userContent.length) throw new Error('empty_turn');
@@ -89,7 +86,7 @@ export async function runTurn({ account, conversationId, turnId, userBlocks, use
   let outcome = 'iteration_limit';
 
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
-    // Re-checked before every Claude call, so blocking a user or lowering a limit takes effect mid-turn.
+    // Re-checked before every model call, so blocking a user or lowering a limit takes effect mid-turn.
     const { rows: [current] } = await query('SELECT status, token_limit, limit_period FROM users WHERE id = $1', [account.id]);
     if (!current || current.status !== 'active') {
       emit({ type: 'error', message: 'הגישה לחשבון אינה פעילה, ולכן העיבוד נעצר.' });
@@ -103,27 +100,24 @@ export async function runTurn({ account, conversationId, turnId, userBlocks, use
     }
     emit({ type: 'status', text: iteration === 0 ? 'חושב…' : 'ממשיך בעיבוד…' });
 
-    const stream = anthropic().beta.messages.stream({
-      model: MODEL,
-      max_tokens: 32000,
+    const message = await streamModel(llm, {
       system: SYSTEM_PROMPT,
       tools: TOOLS,
       messages,
-      output_config: { effort: EFFORT },
-      cache_control: { type: 'ephemeral' },
-      ...(USE_FALLBACKS ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' } : {}),
-    }, { signal });
-    stream.on('text', (delta) => emit({ type: 'text', delta }));
-    const message = await stream.finalMessage();
+      signal,
+      onText: (delta) => emit({ type: 'text', delta }),
+    });
 
     const toolUses = message.content.filter((block) => block.type === 'tool_use');
-    await recordClaudeUsage({
+    await recordModelUsage({
       account,
       conversationId,
       turnId,
+      provider: llm.provider,
       model: message.model,
+      requestedModel: llm.model,
       usage: message.usage,
-      detail: { iteration, stop_reason: message.stop_reason, tools: toolUses.map((t) => t.name) },
+      detail: { iteration, stop_reason: message.stopReason, tools: toolUses.map((t) => t.name) },
     });
 
     const uiItems = message.content
@@ -133,12 +127,12 @@ export async function runTurn({ account, conversationId, turnId, userBlocks, use
     messages.push({ role: 'assistant', content: message.content });
     emit({ type: 'segment_end' });
 
-    if (message.stop_reason === 'refusal') {
+    if (message.stopReason === 'refusal') {
       emit({ type: 'error', message: 'המודל סירב להשלים את הבקשה. נסו לנסח אותה מחדש.' });
       outcome = 'refused';
       break;
     }
-    if (message.stop_reason === 'max_tokens') {
+    if (message.stopReason === 'max_tokens') {
       emit({ type: 'notice', text: 'התשובה נקטעה כי הגיעה לאורך המרבי.' });
       outcome = 'truncated';
       break;

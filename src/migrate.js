@@ -85,6 +85,22 @@ CREATE INDEX IF NOT EXISTS turns_conversation ON turns (conversation_id, id DESC
 
 ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS turn_id INTEGER;
 CREATE INDEX IF NOT EXISTS usage_events_turn ON usage_events (turn_id);
+
+-- Language-model calls from any provider are kind 'llm'; rows written before providers existed are 'claude'.
+ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS provider TEXT;
+UPDATE usage_events SET provider = 'anthropic' WHERE kind = 'claude' AND provider IS NULL;
+
+-- API keys entered in the admin panel, AES-256-GCM encrypted under SETTINGS_ENCRYPTION_KEY (see secrets.js).
+-- Kept out of the settings table, which the admin API returns whole.
+CREATE TABLE IF NOT EXISTS provider_keys (
+  provider    TEXT PRIMARY KEY,                   -- anthropic | openai | gemini
+  ciphertext  TEXT NOT NULL,
+  iv          TEXT NOT NULL,
+  tag         TEXT NOT NULL,
+  last4       TEXT NOT NULL,
+  updated_by  TEXT,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 `;
 
 const DEFAULT_SETTINGS = {

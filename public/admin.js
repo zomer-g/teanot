@@ -79,7 +79,7 @@ function toast(text, { error = false } = {}) {
   setTimeout(() => el.remove(), 6000);
 }
 
-const state = { users: [], settings: {}, usage: { offset: 0, limit: 100, filters: {} }, queries: { offset: 0, limit: 50, filters: {} } };
+const state = { users: [], settings: {}, models: null, available: {}, usage: { offset: 0, limit: 100, filters: {} }, queries: { offset: 0, limit: 50, filters: {} } };
 const select = (options, value, props = {}) =>
   h('select', { class: 'select', ...props }, Object.entries(options).map(([v, label]) => h('option', { value: v, selected: v === (value ?? '') }, label)));
 
@@ -310,12 +310,14 @@ function renderQueries(data) {
         h('span', { class: 'badge badge-muted', text: REQUEST_KINDS[t.request_kind] || t.request_kind }),
         h('div', { class: 'small clamp-2', title: summary, text: summary })),
       h('td', { style: 'min-width:180px;max-width:300px' }, searches.length ? searches : h('span', { class: 'small muted', text: '—' })),
-      h('td', { class: 'num', text: fmtInt(t.claude_calls) }),
+      h('td', { class: 'num', text: fmtInt(t.model_calls) }),
       h('td', { class: 'num' },
         h('div', { text: fmtInt(t.total_tokens) }),
         t.total_tokens ? h('div', { class: 'cell-note', text: `קלט ${fmtInt(t.input_tokens)} · פלט ${fmtInt(t.output_tokens)}` }) : null,
         t.total_tokens ? h('div', { class: 'cell-note', text: `מטמון ${fmtInt(t.cache_creation_tokens)} / ${fmtInt(t.cache_read_tokens)}` }) : null),
-      h('td', { class: 'num', style: 'font-weight:600', text: fmtUsd(t.cost_usd) }),
+      h('td', { class: 'num', style: 'font-weight:600' },
+        h('div', { text: fmtUsd(t.cost_usd) }),
+        t.unpriced_calls ? h('div', { class: 'cell-note', text: `חלקית: ${fmtInt(t.unpriced_calls)} קריאות ללא מחיר` }) : null),
       h('td', { class: 'num small', text: fmtDuration(t.duration_seconds) }),
       h('td', {},
         h('span', { class: `badge ${statusClass}`, text: statusLabel }),
@@ -341,8 +343,8 @@ function renderQueries(data) {
       h('a', { class: 'btn btn-secondary', href: `/api/admin/turns.csv?${queryFilterParams()}` }, 'ייצוא ל-CSV')),
     h('p', { class: 'small' },
       `${fmtInt(data.totals.turns)} שאילתות · ${fmtInt(data.totals.tokens)} טוקנים · עלות משוערת ${fmtUsd(data.totals.cost)} · ${fmtInt(data.totals.tagit_calls)} פעולות TAG-IT`,
-      h('span', { class: 'muted', text: ' · העלות מחושבת לפי מחירון Anthropic.' })),
-    dataTable('יומן שאילתות', ['זמן', 'משתמש', 'בקשה', 'חיפושים ב-TAG-IT', 'קריאות Claude', 'טוקנים', 'עלות', 'משך', 'סטטוס', ''], rows, 'אין שאילתות'),
+      h('span', { class: 'muted', text: ' · העלות מחושבת לפי המחירים שבלשונית "מודל שפה"; קריאה למודל ללא מחיר נספרת כ-0.' })),
+    dataTable('יומן שאילתות', ['זמן', 'משתמש', 'בקשה', 'חיפושים ב-TAG-IT', 'קריאות למודל', 'טוקנים', 'עלות', 'משך', 'סטטוס', ''], rows, 'אין שאילתות'),
     pager(offset, limit, data.turns.length, data.totals.turns, (next) => { state.queries.offset = next; loadQueries(); }));
 }
 
@@ -357,9 +359,15 @@ async function loadUsage() {
   renderUsage(data);
 }
 
+const PROVIDER_LABELS = { anthropic: 'Claude', openai: 'OpenAI', gemini: 'Gemini' };
+const isModelEvent = (e) => e.kind === 'llm' || e.kind === 'claude';
+
 function describeEvent(e) {
   const d = e.detail || {};
-  if (e.kind === 'claude') return d.tools?.length ? `כלים: ${d.tools.join(', ')}` : `סיום: ${d.stop_reason || '—'}`;
+  if (isModelEvent(e)) {
+    const what = d.tools?.length ? `כלים: ${d.tools.join(', ')}` : `סיום: ${d.stop_reason || '—'}`;
+    return [e.model, what, d.priced === false ? 'ללא מחיר' : null].filter(Boolean).join(' · ');
+  }
   const actions = { search_sentencing: 'חיפוש גזרי דין', search_guidelines: 'חיפוש הנחיות', more_sentencing: 'תוצאות נוספות', read_document: 'קריאת מסמך', open_file: 'פתיחת קובץ' };
   const parts = [actions[d.action] || d.action, d.label, d.total != null ? `${d.total} תוצאות` : null, d.returned != null && d.total == null ? `${d.returned} הוחזרו` : null, d.error ? `שגיאה: ${d.error}` : null];
   return parts.filter(Boolean).join(' · ');
@@ -370,7 +378,7 @@ function renderUsage(data) {
   const { filters, offset, limit } = state.usage;
   const userSel = h('select', { class: 'select' }, h('option', { value: '' }, 'כל המשתמשים'),
     state.users.map((u) => h('option', { value: u.id, selected: String(u.id) === String(filters.user_id ?? '') }, u.email)));
-  const kindSel = select({ '': 'הכול', claude: 'Claude', tagit: 'TAG-IT' }, filters.kind ?? '');
+  const kindSel = select({ '': 'הכול', llm: 'מודל שפה', tagit: 'TAG-IT' }, filters.kind ?? '');
   const from = h('input', { class: 'input', type: 'date', value: filters.from ?? '' });
   const to = h('input', { class: 'input', type: 'date', value: filters.to ?? '' });
   const apply = () => {
@@ -382,16 +390,16 @@ function renderUsage(data) {
   const rows = data.events.map((e) => h('tr', {},
     h('td', { class: 'num small', text: fmtDateTime(e.created_at) }),
     h('td', { class: 'small', dir: 'ltr', style: 'text-align:right', text: e.user_email }),
-    h('td', {}, h('span', { class: `badge ${e.kind === 'claude' ? 'badge-navy' : 'badge-gold'}`, text: e.kind === 'claude' ? 'Claude' : 'TAG-IT' })),
+    h('td', {}, h('span', { class: `badge ${isModelEvent(e) ? 'badge-navy' : 'badge-gold'}`, text: isModelEvent(e) ? (PROVIDER_LABELS[e.provider] || 'מודל שפה') : 'TAG-IT' })),
     h('td', { class: 'small' }, e.conversation_id
       ? h('button', { class: 'link-btn', type: 'button', text: e.conversation_title || 'שיחה', onClick: () => openTranscript(e.conversation_id) })
       : '—'),
     h('td', { class: 'small', text: describeEvent(e) }),
-    h('td', { class: 'num', text: e.kind === 'claude' ? fmtInt(e.input_tokens) : '' }),
-    h('td', { class: 'num', text: e.kind === 'claude' ? fmtInt(e.output_tokens) : '' }),
-    h('td', { class: 'num', text: e.kind === 'claude' ? `${fmtInt(e.cache_creation_tokens)} / ${fmtInt(e.cache_read_tokens)}` : '' }),
-    h('td', { class: 'num', style: 'font-weight:600', text: e.kind === 'claude' ? fmtInt(e.total_tokens) : '' }),
-    h('td', { class: 'num', text: e.kind === 'claude' ? fmtUsd(e.cost_usd) : '' })));
+    h('td', { class: 'num', text: isModelEvent(e) ? fmtInt(e.input_tokens) : '' }),
+    h('td', { class: 'num', text: isModelEvent(e) ? fmtInt(e.output_tokens) : '' }),
+    h('td', { class: 'num', text: isModelEvent(e) ? `${fmtInt(e.cache_creation_tokens)} / ${fmtInt(e.cache_read_tokens)}` : '' }),
+    h('td', { class: 'num', style: 'font-weight:600', text: isModelEvent(e) ? fmtInt(e.total_tokens) : '' }),
+    h('td', { class: 'num', text: !isModelEvent(e) ? '' : e.detail?.priced === false ? 'ללא מחיר' : fmtUsd(e.cost_usd) })));
 
   section.replaceChildren(
     h('h2', { class: 'sr-only', text: 'יומן קריאות API' }),
@@ -517,9 +525,160 @@ function renderSettings() {
   h('button', { class: 'btn btn-accent', type: 'submit' }, 'שמירה')));
 }
 
+// ---------- Language model ----------
+
+const BUILTIN_PRICED = new Set(['claude-opus-5', 'claude-opus-4-8']);
+
+async function loadModels({ focus } = {}) {
+  state.models = await api('/models');
+  renderModels({ focus });
+}
+
+function keyStatusText(key) {
+  if (key.unreadable) return 'שמור מפתח שלא ניתן לפענח, כי מפתח ההצפנה בשרת השתנה. יש להזין אותו מחדש.';
+  if (key.source === 'admin') {
+    const by = [key.updatedBy ? `על ידי ${key.updatedBy}` : null, key.updatedAt ? `ב-${fmtDateTime(key.updatedAt)}` : null].filter(Boolean).join(' ');
+    return `מוגדר בממשק, מסתיים ב-${key.last4}${by ? ` · עודכן ${by}` : ''}.`;
+  }
+  if (key.source === 'env') return `מוגדר במשתני הסביבה של השרת (${key.envKeyName}). מפתח שיוזן כאן יקבל עדיפות.`;
+  return 'לא הוגדר מפתח.';
+}
+
+// Runs an admin request, reports the outcome in a toast, and returns the payload (null on failure).
+async function runAction(action, { success }) {
+  try {
+    const result = await action();
+    if (result?.warning) toast(result.warning, { error: true });
+    else if (success) toast(typeof success === 'function' ? success(result) : success);
+    return result;
+  } catch (err) {
+    toast(err.data?.message || `שגיאה: ${err.message}`, { error: true });
+    return null;
+  }
+}
+
+function activeProviderCard() {
+  const m = state.models;
+  const titleId = 'models-active-title';
+  const radios = m.providers.map((p) => {
+    const id = `active-provider-${p.id}`;
+    const ready = Boolean(p.key.source) && Boolean(m.models[p.id]);
+    return h('div', { class: 'radio-row' },
+      h('input', { type: 'radio', name: 'active-provider', id, value: p.id, checked: m.provider === p.id }),
+      h('label', { for: id },
+        h('strong', { text: p.label }),
+        m.models[p.id] ? h('span', { class: 'small muted', dir: 'ltr', text: m.models[p.id] }) : null,
+        h('span', { class: `badge ${ready ? 'badge-success' : 'badge-muted'}`, text: ready ? 'מוכן לשימוש' : !p.key.source ? 'חסר מפתח' : 'לא נבחר מודל' })));
+  });
+  const form = h('form', { class: 'card card-body', 'aria-labelledby': titleId, onSubmit: async (e) => {
+    e.preventDefault();
+    const provider = form.querySelector('input[name="active-provider"]:checked')?.value;
+    const payload = await runAction(() => api('/models', { method: 'PUT', body: { provider } }), { success: 'המודל הפעיל עודכן.' });
+    if (payload) { state.models = payload; renderModels({ focus: titleId }); }
+  } },
+  h('h2', { class: 'card-title', id: titleId, tabindex: '-1', text: 'המודל שמפעיל את המערכת' }),
+  h('p', { class: 'small muted', text: 'חל על כל שאילתה חדשה של כל המשתמשים. שאילתה שכבר רצה מסתיימת במודל שבו התחילה, ושיחה קיימת ממשיכה במודל החדש.' }),
+  h('fieldset', { class: 'radio-group' }, h('legend', { class: 'sr-only', text: 'ספק מודל השפה' }), radios),
+  h('button', { class: 'btn btn-accent', type: 'submit' }, 'שמירת המודל הפעיל'));
+  return form;
+}
+
+function providerCard(p) {
+  const m = state.models;
+  const titleId = `provider-title-${p.id}`;
+  const statusId = `provider-key-status-${p.id}`;
+  const listId = `provider-models-${p.id}`;
+  const modelInputId = `provider-model-input-${p.id}`;
+  const available = state.available[p.id] || [];
+
+  const keyInput = h('input', { class: 'input', type: 'password', autocomplete: 'off', spellcheck: 'false', dir: 'ltr', 'aria-describedby': statusId, disabled: !m.encryptionAvailable });
+  const keyForm = h('form', { onSubmit: async (e) => {
+    e.preventDefault();
+    if (!keyInput.value.trim()) { toast('יש להדביק מפתח.', { error: true }); keyInput.focus(); return; }
+    const payload = await runAction(() => api(`/models/${p.id}/key`, { method: 'PUT', body: { apiKey: keyInput.value.trim() } }), {
+      success: (r) => `המפתח נבדק מול הספק ונשמר מוצפן. נמצאו ${fmtInt(r.available.length)} מודלים.`,
+    });
+    if (payload) { state.models = payload; state.available[p.id] = payload.available; renderModels({ focus: titleId }); }
+  } },
+  h('label', {}, h('span', { class: 'label', text: 'מפתח API חדש' }), keyInput),
+  h('div', { class: 'toolbar', style: 'margin:8px 0 0' },
+    h('button', { class: 'btn btn-primary btn-sm', type: 'submit', disabled: !m.encryptionAvailable }, 'בדיקה ושמירה'),
+    p.key.source === 'admin' || p.key.unreadable
+      ? h('button', { class: 'btn btn-secondary btn-sm', type: 'button', onClick: async () => {
+        if (!confirm(`למחוק את מפתח ${p.label} שהוזן בממשק?`)) return;
+        const payload = await runAction(() => api(`/models/${p.id}/key`, { method: 'DELETE' }), { success: 'המפתח נמחק.' });
+        if (payload) { state.models = payload; renderModels({ focus: titleId }); }
+      } }, 'מחיקת המפתח')
+      : null));
+
+  const modelInput = h('input', { class: 'input', id: modelInputId, dir: 'ltr', list: listId, value: m.models[p.id] || '', autocomplete: 'off', spellcheck: 'false', required: true });
+  const priceField = (name, label) => h('label', {}, h('span', { class: 'label', text: label }),
+    h('input', { class: 'input', type: 'number', min: 0, step: 'any', inputmode: 'decimal', dir: 'ltr', name }));
+  const prices = h('fieldset', { class: 'price-grid' },
+    h('legend', { class: 'label', text: 'מחיר בדולרים למיליון טוקנים' }),
+    priceField('input', 'קלט'), priceField('output', 'פלט'), priceField('cacheRead', 'קלט מהמטמון (רשות)'), priceField('cacheWrite', 'כתיבה למטמון (רשות)'));
+  const priceNote = h('p', { class: 'small muted', style: 'margin:4px 0 0' });
+  const fillPrices = () => {
+    const model = modelInput.value.trim();
+    const price = m.prices[model] ?? null;
+    for (const input of prices.querySelectorAll('input')) input.value = price?.[input.name] ?? '';
+    priceNote.textContent = price ? '' : BUILTIN_PRICED.has(model)
+      ? 'למודל הזה יש מחיר מובנה; מחיר שיוזן כאן יחליף אותו.'
+      : 'לא הוגדר מחיר למודל הזה, ולכן העלות שלו תוצג כלא ידועה.';
+  };
+  modelInput.addEventListener('change', fillPrices);
+  fillPrices();
+
+  const modelForm = h('form', { onSubmit: async (e) => {
+    e.preventDefault();
+    const model = modelInput.value.trim();
+    const values = {};
+    for (const input of prices.querySelectorAll('input')) if (input.value !== '') values[input.name] = Number(input.value);
+    const anyPrice = Object.keys(values).length > 0;
+    if (anyPrice && (values.input === undefined || values.output === undefined)) {
+      toast('למחיר יש להזין לפחות קלט ופלט.', { error: true });
+      return;
+    }
+    const body = { models: { [p.id]: model }, ...(anyPrice ? { prices: { [model]: values } } : {}) };
+    const payload = await runAction(() => api('/models', { method: 'PUT', body }), { success: `ההגדרות של ${p.label} נשמרו.` });
+    if (payload) { state.models = payload; renderModels({ focus: titleId }); }
+  } },
+  h('div', { class: 'form-grid' },
+    h('label', {}, h('span', { class: 'label', text: 'מודל' }), modelInput, h('datalist', { id: listId }, available.map((id) => h('option', { value: id })))),
+    h('div', { style: 'align-self:end' },
+      h('button', { class: 'btn btn-secondary btn-sm', type: 'button', disabled: !p.key.source, onClick: async () => {
+        const result = await runAction(() => api(`/models/${p.id}/available`), { success: (r) => `נטענו ${fmtInt(r.available.length)} מודלים לבחירה בשדה "מודל".` });
+        if (result) { state.available[p.id] = result.available; renderModels({ focus: modelInputId }); }
+      } }, 'טעינת רשימת המודלים מהספק'))),
+  prices,
+  priceNote,
+  h('button', { class: 'btn btn-accent btn-sm', type: 'submit', style: 'margin-top:12px' }, 'שמירת מודל ומחיר'));
+
+  return h('section', { class: 'card card-body', 'aria-labelledby': titleId },
+    h('h2', { class: 'card-title', id: titleId, tabindex: '-1' }, p.label,
+      m.provider === p.id ? h('span', { class: 'badge badge-navy', style: 'margin-inline-start:8px', text: 'פעיל' }) : null),
+    h('p', { class: 'small', id: statusId, text: keyStatusText(p.key) }),
+    keyForm,
+    h('hr', { class: 'divider' }),
+    modelForm);
+}
+
+function renderModels({ focus } = {}) {
+  const section = document.getElementById('tab-models');
+  // replaceChildren would print a null child as the text "null".
+  section.replaceChildren(...[
+    h('h2', { class: 'sr-only', text: 'מודל שפה' }),
+    state.models.encryptionAvailable ? null : h('div', { class: 'notice-box', text: 'כדי לשמור מפתחות API בממשק יש להגדיר בשרת את משתנה הסביבה SETTINGS_ENCRYPTION_KEY (מחרוזת אקראית של 32 תווים לפחות) ולפרוס מחדש. עד אז אפשר להשתמש רק במפתחות שהוגדרו במשתני הסביבה.' }),
+    h('p', { class: 'small muted', text: 'מפתחות נשמרים מוצפנים ואינם מוצגים שוב לאחר השמירה. לפני השמירה המפתח נבדק מול הספק.' }),
+    activeProviderCard(),
+    ...state.models.providers.map(providerCard),
+  ].filter(Boolean));
+  if (focus) document.getElementById(focus)?.focus();
+}
+
 // ---------- Tabs & boot ----------
 
-const TAB_NAMES = ['queries', 'users', 'usage', 'settings'];
+const TAB_NAMES = ['queries', 'users', 'usage', 'models', 'settings'];
 const tabButtons = [...document.querySelectorAll('[role="tab"]')];
 
 function switchTab(name, { focus = false } = {}) {
@@ -534,6 +693,7 @@ function switchTab(name, { focus = false } = {}) {
   if (name === 'queries') loadQueries();
   if (name === 'usage') loadUsage();
   if (name === 'settings') renderSettings();
+  if (name === 'models') loadModels().catch((err) => toast(`שגיאה: ${err.message}`, { error: true }));
   if (name === 'users') loadUsers();
 }
 

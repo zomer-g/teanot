@@ -1,8 +1,9 @@
-// Boot-time diagnostics written to the runtime log (never secret values): are Claude and TAG-IT
+// Boot-time diagnostics written to the runtime log (never secret values): are the language model and TAG-IT
 // reachable with the configured keys, and does TAG-IT's live schema carry the fields the tools filter on?
-import Anthropic from '@anthropic-ai/sdk';
 import * as tagit from './tagit.js';
 import { probePdfExtraction } from './extract.js';
+import { activeModel, keyStatus, streamModel } from './llm/index.js';
+import { encryptionAvailable } from './secrets.js';
 
 const EXPECTED_FIELDS = [
   'meta.topics', 'meta.drug_types', 'meta.offense_sections', 'meta.offense_law_sections', 'meta.drug_ordinance_sections',
@@ -20,7 +21,7 @@ async function timed(fn) {
 
 export async function runSelfCheck() {
   const report = {
-    env: Object.fromEntries(['ANTHROPIC_API_KEY', 'TAGIT_API_KEY', 'TAGIT_GUIDELINES_API_KEY', 'ADMIN_EMAILS', 'XHOST_AUTH_AUDIENCES']
+    env: Object.fromEntries(['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'SETTINGS_ENCRYPTION_KEY', 'TAGIT_API_KEY', 'TAGIT_GUIDELINES_API_KEY', 'ADMIN_EMAILS', 'XHOST_AUTH_AUDIENCES']
       .map((key) => [key, Boolean(process.env[key])])),
     adminCount: (process.env.ADMIN_EMAILS ?? '').split(',').filter((s) => s.trim()).length,
   };
@@ -34,20 +35,27 @@ export async function runSelfCheck() {
     }
   });
 
-  const model = process.env.CLAUDE_MODEL || 'claude-opus-5';
-  report.anthropic = await timed(async () => {
+  report.encryptionAvailable = encryptionAvailable();
+  report.llm = await timed(async () => {
     try {
-      const client = new Anthropic();
-      await client.models.retrieve(model);
-      const useFallbacks = process.env.CLAUDE_FALLBACKS !== 'off';
-      const message = await client.beta.messages.create({
-        model,
-        max_tokens: 256,
-        output_config: { effort: 'low' },
-        messages: [{ role: 'user', content: 'Reply with the single word OK.' }],
-        ...(useFallbacks ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' } : {}),
+      const keys = await keyStatus();
+      const llm = await activeModel();
+      let text = '';
+      const answer = await streamModel(llm, {
+        system: 'Reply with the single word OK.',
+        tools: [],
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'Reply with the single word OK.' }] }],
+        onText: (delta) => { text += delta; },
       });
-      return { ok: true, model: message.model, fallbacks: useFallbacks, stop_reason: message.stop_reason };
+      return {
+        ok: true,
+        provider: llm.provider,
+        requestedModel: llm.model,
+        model: answer.model,
+        stopReason: answer.stopReason,
+        replied: Boolean(text.trim()),
+        keySources: Object.fromEntries(Object.entries(keys).map(([id, k]) => [id, k.source])),
+      };
     } catch (err) {
       return errorInfo(err);
     }

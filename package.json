@@ -11,12 +11,14 @@
   "dependencies": {
     "@anthropic-ai/sdk": "0.125.0",
     "@fontsource-variable/heebo": "5.3.0",
+    "@google/genai": "2.22.0",
     "dompurify": "3.4.15",
     "express": "5.2.1",
     "jose": "6.2.12",
     "mammoth": "1.12.3",
     "marked": "18.0.13",
     "multer": "2.4.0",
+    "openai": "7.16.0",
     "pdfjs-dist": "6.3.289",
     "pg": "8.23.0",
     "zod": "4.6.5"
