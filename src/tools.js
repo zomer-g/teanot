@@ -8,6 +8,15 @@ import * as tagit from './tagit.js';
 const DRUG_SLUG_VALUES = Object.values(tagit.DRUG_SLUGS);
 const text = z.string().trim();
 const optText = z.string().trim().nullable().optional();
+
+// In full-text search a bare section number ("329", "144(ב)") matches any decision that mentions that number
+// anywhere, so ORing one in floods the results with unrelated cases. Sections belong in the offense filters.
+const bareSectionTerm = (term) => /\d/.test(term)
+  && term.replace(/\([^)]{0,4}\)/g, '').replace(/[\d\s.,/\-"'()[\]]/g, '').length <= 1;
+const sentencingTextQuery = optText.refine(
+  (q) => !q || !/\sOR\s/.test(q) || !q.split(/\s+OR\s+/).some((t) => bareSectionTerm(t.replace(/^-/, ''))),
+  'A section number in text_query matches any decision that mentions that number. Filter sections with offense_sections or offense_law_sections, and use words or exact phrases here, e.g. "חבלה בכוונה מחמירה".',
+);
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD').nullable().optional();
 
 // ---------- Schemas ----------
@@ -89,7 +98,7 @@ export const sentencingParamsSchema = z.object({
   prison_months_max: z.number().min(0).nullable().optional(),
   confessed: z.boolean().nullable().optional(),
   agreed_sentence: z.boolean().nullable().optional(),
-  text_query: optText.describe('Optional full-text query over the decision text: space = AND, "exact phrase", -exclude, OR. Slower; use only when meta filters cannot express the need'),
+  text_query: sentencingTextQuery.describe('Optional full-text query over the decision text: space = AND, "exact phrase", -exclude, OR. Slower; use only when meta filters cannot express the need'),
   flags: z.record(z.string().regex(/^meta\.[a-z0-9_]{1,60}$/), z.boolean()).optional()
     .describe('Yes/no sentencing flags as meta.* key → true/false. The user\'s search setup already sets these; add one only if the user asks for it in conversation'),
   sort: z.enum(['severity', 'prison', 'date']).default('severity'),
