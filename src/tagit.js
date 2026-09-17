@@ -215,7 +215,8 @@ function comparator(p) {
 function withoutDuplicateDecisions(items) {
   const seen = new Set();
   return items.filter((item) => {
-    const key = [String(item.title ?? '').replace(/[\s()]/g, ''), item.date ?? '', item.prisonMonths ?? ''].join('|');
+    // Copies differ in custody notes such as "(עציר)" or "(אחר/נוסף)", so parenthesized text is ignored.
+    const key = [String(item.title ?? '').replace(/\([^)]*\)/g, '').replace(/[\s()]/g, ''), item.date ?? '', item.prisonMonths ?? ''].join('|');
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
