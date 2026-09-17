@@ -2,6 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { initDb } from './src/db.js';
+import { repriceUnpricedUsage } from './src/usage.js';
 import { migrate } from './src/migrate.js';
 import { assertAuthConfig, attachUser, requireAdmin } from './src/auth.js';
 import { blockCrossSiteWrites, securityHeaders } from './src/security.js';
@@ -16,6 +17,8 @@ const viewsDir = path.join(root, 'views');
 assertAuthConfig();
 await initDb();
 await migrate();
+// Calls logged before their model had a price get their cost now (see usage.js).
+repriceUnpricedUsage().then((r) => { if (r.repriced) console.log(`[usage] repriced ${r.repriced} of ${r.unpriced} unpriced model calls`); }).catch((err) => console.error('[usage] repricing failed', err));
 
 const app = express();
 app.disable('x-powered-by');

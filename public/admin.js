@@ -1,5 +1,6 @@
 import { marked } from '/vendor/marked.js';
 import DOMPurify from '/vendor/purify.js';
+import { describeSearch } from '/search-describe.js';
 
 // Same Markdown-only allowlist as the chat: transcripts show other users' (model-written) content.
 const PURIFY_CONFIG = {
@@ -276,11 +277,16 @@ function requestSummary(t) {
 }
 
 function searchLines(t) {
-  return (t.searches || []).filter((s) => s && s.action !== 'open_file').map((s) => h('div', { class: 'small' },
-    h('strong', { text: `${SEARCH_ACTIONS[s.action] || s.action}: ` }),
-    [s.label, s.action === 'read_document' ? `${s.kind === 'ruling' ? 'גזר דין' : 'הנחיה'} ${s.id}` : null].filter(Boolean).join(' '),
-    s.total != null ? ` (${fmtInt(s.total)})` : s.returned != null ? ` (${fmtInt(s.returned)})` : '',
-    s.error ? h('div', { class: 'cell-error', text: `שגיאה: ${truncate(s.error, 100)}` }) : null));
+  // What was actually searched, not only the label the model gave it.
+  return (t.searches || []).filter((s) => s && s.action !== 'open_file').map((s) => {
+    const { title, parts } = describeSearch(s);
+    const errorPart = parts.find((p) => p.startsWith('שגיאה'));
+    return h('div', { class: 'small search-line' },
+      h('strong', { text: `${SEARCH_ACTIONS[s.action] || s.action}: ` }),
+      [title, s.action === 'read_document' ? `${s.kind === 'ruling' ? 'גזר דין' : 'הנחיה'} ${s.id}` : null].filter(Boolean).join(' '),
+      parts.filter((p) => p !== errorPart).length ? h('div', { class: 'cell-note search-detail', text: parts.filter((p) => p !== errorPart).join(' · ') }) : null,
+      errorPart ? h('div', { class: 'cell-error', text: errorPart }) : null);
+  });
 }
 
 function renderQueries(data) {
@@ -369,8 +375,8 @@ function describeEvent(e) {
     return [e.model, what, d.priced === false ? 'ללא מחיר' : null].filter(Boolean).join(' · ');
   }
   const actions = { search_sentencing: 'חיפוש גזרי דין', search_guidelines: 'חיפוש הנחיות', more_sentencing: 'תוצאות נוספות', read_document: 'קריאת מסמך', open_file: 'פתיחת קובץ' };
-  const parts = [actions[d.action] || d.action, d.label, d.total != null ? `${d.total} תוצאות` : null, d.returned != null && d.total == null ? `${d.returned} הוחזרו` : null, d.error ? `שגיאה: ${d.error}` : null];
-  return parts.filter(Boolean).join(' · ');
+  const { title, parts } = describeSearch(d);
+  return [actions[d.action] || d.action, title, ...parts].filter(Boolean).join(' · ');
 }
 
 function renderUsage(data) {
