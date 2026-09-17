@@ -287,7 +287,7 @@ export async function executeTool(toolUse, ctx) {
       activity(label, 'running');
       try {
         const result = await tagit.searchSentencing(params, { signal });
-        await recordTagitCall({ account, conversationId, turnId, detail: { action: 'search_sentencing', label: params.label, filter: result.filter, total: result.total, returned: result.items.length } });
+        await recordTagitCall({ account, conversationId, turnId, detail: { action: 'search_sentencing', label: params.label, filter: result.filter, sort: params.sort, sort_direction: params.sort_direction, text_query: params.text_query || undefined, total: result.total, returned: result.items.length } });
         const data = { label: params.label, params, total: result.total, page: result.page, size: result.size, items: result.items };
         activity(label, 'done', { summary: result.total != null ? `${result.total} תוצאות` : `${result.items.length} תוצאות` });
         emit({ type: 'results', toolUseId: toolUse.id, data });
@@ -308,7 +308,7 @@ export async function executeTool(toolUse, ctx) {
       activity(label, 'running');
       try {
         const result = await tagit.searchGuidelines(params, { signal });
-        await recordTagitCall({ account, conversationId, turnId, detail: { action: 'search_guidelines', label: params.label, queries: params.queries, returned: result.items.length } });
+        await recordTagitCall({ account, conversationId, turnId, detail: { action: 'search_guidelines', label: params.label, queries: params.queries, sources: params.sources?.length ? params.sources : undefined, topic: params.topic || undefined, returned: result.items.length } });
         const data = { label: params.label, params, totals: result.totals, items: result.items };
         activity(label, 'done', { summary: `${result.items.length} הנחיות` });
         emit({ type: 'guidelines', toolUseId: toolUse.id, data });

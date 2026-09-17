@@ -3,8 +3,9 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { query } from '../db.js';
 import { requireAdmin } from '../auth.js';
-import { getSettings, setSetting } from '../usage.js';
+import { getSettings, repriceUnpricedUsage, setSetting } from '../usage.js';
 import { encryptionAvailable } from '../secrets.js';
+import { describeSearch } from '../../public/search-describe.js';
 import { deleteKey, keyStatus, listModels, MODEL_ID_RE, modelSettings, PROVIDER_IDS, PROVIDERS, resolveKey, saveKey, saveModelSettings } from '../llm/index.js';
 
 export const adminRouter = Router();
@@ -170,6 +171,7 @@ adminRouter.put('/models', async (req, res) => {
     if (!next[data.provider]) return res.status(400).json({ error: 'no_model', message: 'יש לבחור מודל עבור הספק לפני שמפעילים אותו.' });
   }
   await saveModelSettings(data);
+  if (data.prices) await repriceUnpricedUsage(); // a newly entered price also fixes calls logged without one
   console.log(`[admin] model settings changed by ${req.account.email}: ${JSON.stringify({ provider: data.provider, models: data.models, prices: data.prices ? Object.keys(data.prices) : undefined })}`);
   res.json(await modelsPayload());
 });
@@ -358,7 +360,7 @@ adminRouter.get('/turns.csv', async (req, res) => {
   };
   const lines = turns.map((t) => [
     new Date(t.started_at).toISOString(), t.user_email, REQUEST_KIND_LABELS[t.request_kind] || t.request_kind, requestDescription(t),
-    t.searches.map((s) => [s.action, s.label, s.total ?? s.returned, s.error ? `error: ${s.error}` : null].filter((x) => x != null).join(' ')).join(' | '),
+    t.searches.map((s) => { const d = describeSearch(s); return [s.action, d.title, ...d.parts].filter(Boolean).join(' · '); }).join(' | '),
     t.model_calls, t.input_tokens, t.output_tokens, t.cache_creation_tokens, t.cache_read_tokens, t.total_tokens,
     t.unpriced_calls ? `${t.cost_usd.toFixed(4)} (חלקי: ${t.unpriced_calls} קריאות ללא מחיר)` : t.cost_usd.toFixed(4), Math.round(t.duration_seconds), t.status, t.error, t.conversation_title,
   ].map(cell).join(','));

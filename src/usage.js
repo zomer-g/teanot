@@ -3,21 +3,46 @@
 import { query } from './db.js';
 
 // USD per million tokens. Prices an admin enters (settings.model_prices) take precedence; a model with no price
-// is logged with cost 0 and detail.priced = false, so the admin panel can say the cost is unknown.
+// is logged with cost 0 and detail.priced = false, so the admin panel can say the cost is unknown, and it is
+// re-priced (repriceUnpricedUsage) as soon as a price becomes known.
+//
+// Gemini prices: Google's paid-tier price list, ai.google.dev/gemini-api/docs/pricing, read 2026-09-17. Output
+// includes thinking tokens, which the Gemini adapter already counts as output. Pro models charge more once a
+// prompt passes 200k tokens, so those carry a second tier.
 const BUILTIN_PRICES = {
   'claude-opus-5': { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 },
   'claude-opus-4-8': { input: 5, output: 25, cacheWrite: 6.25, cacheRead: 0.5 },
+  'gemini-3.1-pro-preview': { input: 2, output: 12, cacheWrite: 2, cacheRead: 0.2, longPrompt: { overTokens: 200_000, input: 4, output: 18, cacheWrite: 4, cacheRead: 0.4 } },
+  'gemini-2.5-pro': { input: 1.25, output: 10, cacheWrite: 1.25, cacheRead: 0.125, longPrompt: { overTokens: 200_000, input: 2.5, output: 15, cacheWrite: 2.5, cacheRead: 0.25 } },
+  // Introductory price until the end of 2026, then the standard one.
+  'gemini-3.8-flash': { input: 0.75, output: 3.75, cacheWrite: 0.75, cacheRead: 0.075, from: { date: '2027-01-01', input: 1.5, output: 7.5, cacheWrite: 1.5, cacheRead: 0.15 } },
 };
+
+// A provider may report a dated or suffixed id ("gemini-3.1-pro-preview-09-2026"); match the longest known prefix.
+function builtinPrice(model) {
+  if (!model) return null;
+  if (BUILTIN_PRICES[model]) return BUILTIN_PRICES[model];
+  const key = Object.keys(BUILTIN_PRICES).filter((k) => model.startsWith(`${k}-`)).sort((a, b) => b.length - a.length)[0];
+  return key ? BUILTIN_PRICES[key] : null;
+}
 
 function priceFor(provider, model, adminPrices) {
   const entered = adminPrices?.[model];
   if (entered && Number.isFinite(entered.input) && Number.isFinite(entered.output)) {
     return { input: entered.input, output: entered.output, cacheRead: entered.cacheRead ?? entered.input, cacheWrite: entered.cacheWrite ?? entered.input };
   }
-  if (BUILTIN_PRICES[model]) return BUILTIN_PRICES[model];
+  const builtin = builtinPrice(model);
+  if (builtin) return builtin;
   // Server-side fallbacks can answer with another Claude model; bill it like the one requested rather than as free.
   if (provider === 'anthropic') return BUILTIN_PRICES['claude-opus-5'];
   return null;
+}
+
+function costOf(price, { input = 0, output = 0, cacheWrite = 0, cacheRead = 0 }, at = new Date()) {
+  let rate = price;
+  if (price.from && new Date(at) >= new Date(price.from.date)) rate = price.from;
+  if (price.longPrompt && input + cacheWrite + cacheRead > price.longPrompt.overTokens) rate = price.longPrompt;
+  return (input * rate.input + output * rate.output + cacheWrite * rate.cacheWrite + cacheRead * rate.cacheRead) / 1e6;
 }
 
 export class QuotaExceededError extends Error {
@@ -73,15 +98,40 @@ export async function recordModelUsage({ account, conversationId, turnId = null,
   const { input = 0, output = 0, cacheWrite = 0, cacheRead = 0 } = usage;
   const settings = await getSettings();
   const price = priceFor(provider, model, settings.model_prices) ?? (requestedModel ? priceFor(provider, requestedModel, settings.model_prices) : null);
-  const cost = price ? (input * price.input + output * price.output + cacheWrite * price.cacheWrite + cacheRead * price.cacheRead) / 1e6 : 0;
+  const cost = price ? costOf(price, { input, output, cacheWrite, cacheRead }) : 0;
   await query(
     `INSERT INTO usage_events
        (user_id, user_email, conversation_id, turn_id, kind, provider, model, input_tokens, output_tokens,
         cache_creation_tokens, cache_read_tokens, total_tokens, cost_usd, detail)
      VALUES ($1, $2, $3, $4, 'llm', $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)`,
     [account.id, account.email, conversationId, turnId, provider, model, input, output, cacheWrite, cacheRead,
-      input + output + cacheWrite + cacheRead, cost, JSON.stringify({ ...detail, priced: Boolean(price) })],
+      input + output + cacheWrite + cacheRead, cost, JSON.stringify({ ...detail, requested_model: requestedModel ?? undefined, priced: Boolean(price) })],
   );
+}
+
+// Model calls logged without a price get their cost once a price is known (built in, or entered by an admin),
+// so the log and monthly totals are not left at $0. Idempotent: priced rows are never touched.
+export async function repriceUnpricedUsage() {
+  const settings = await getSettings();
+  const { rows } = await query(
+    `SELECT id, provider, model, detail->>'requested_model' AS requested_model, input_tokens, output_tokens,
+            cache_creation_tokens, cache_read_tokens, created_at
+     FROM usage_events WHERE kind = 'llm' AND detail->>'priced' = 'false'`,
+  );
+  let repriced = 0;
+  for (const row of rows) {
+    const price = priceFor(row.provider, row.model, settings.model_prices)
+      ?? (row.requested_model ? priceFor(row.provider, row.requested_model, settings.model_prices) : null);
+    if (!price) continue;
+    const cost = costOf(price, { input: row.input_tokens, output: row.output_tokens, cacheWrite: row.cache_creation_tokens, cacheRead: row.cache_read_tokens }, row.created_at);
+    await query(
+      `UPDATE usage_events SET cost_usd = $2, detail = detail || '{"priced": true, "repriced": true}'::jsonb
+       WHERE id = $1 AND detail->>'priced' = 'false'`,
+      [row.id, cost],
+    );
+    repriced++;
+  }
+  return { unpriced: rows.length, repriced };
 }
 
 export async function recordTagitCall({ account, conversationId, turnId = null, detail }) {

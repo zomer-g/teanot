@@ -459,6 +459,8 @@ body.app-page #root { flex: 1; min-height: 0; display: flex; flex-direction: col
 .muted { color: var(--muted); }
 .small { font-size: 13px; }
 .cell-note { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.search-line + .search-line { margin-top: 6px; }
+.cell-note.search-detail { white-space: normal; line-height: 1.5; }
 .cell-error { font-size: 12px; color: var(--error); max-width: 240px; }
 
 /* ---------- Responsive ---------- */
