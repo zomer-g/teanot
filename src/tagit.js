@@ -85,11 +85,14 @@ const RESULT_FIELDS = [
 const rejectedFields = new Set();
 export const rejectedResultFields = () => [...rejectedFields];
 
-const SORTS = {
-  severity: '-meta.severity_score',
-  prison: '-meta.prison_actual_months',
-  date: '-meta.document_date',
+const SORT_FIELDS = {
+  severity: 'meta.severity_score',
+  prison: 'meta.prison_actual_months',
+  date: 'meta.document_date',
 };
+// Severity and prison follow the chosen direction (default: most lenient first); dates are always newest first.
+const sortDirection = (p) => (p.sort === 'date' ? 'desc' : p.sort_direction === 'desc' ? 'desc' : 'asc');
+const FLAG_KEY_RE = /^meta\.[a-z0-9_]{1,60}$/;
 
 export function buildSentencingFilter(p) {
   const clauses = [];
@@ -110,6 +113,10 @@ export function buildSentencingFilter(p) {
   if (p.prison_months_max != null) clauses.push({ field: 'meta.prison_actual_months', op: 'le', value: p.prison_months_max });
   if (p.confessed != null) clauses.push({ field: 'meta.confessed', op: 'eq', value: p.confessed });
   if (p.agreed_sentence != null) clauses.push({ field: 'meta.agreed_sentence', op: 'eq', value: p.agreed_sentence });
+  // Yes/no sentencing flags chosen in the search setup (indexed meta.* booleans).
+  for (const [key, value] of Object.entries(p.flags ?? {})) {
+    if (FLAG_KEY_RE.test(key) && typeof value === 'boolean') clauses.push({ field: key, op: 'eq', value });
+  }
   return clauses.length ? { op: 'and', clauses } : null;
 }
 
@@ -186,11 +193,22 @@ export function normalizeRuling(item) {
   };
 }
 
-const COMPARATORS = {
-  severity: (a, b) => (b.severity ?? -Infinity) - (a.severity ?? -Infinity) || (b.prisonMonths ?? -1) - (a.prisonMonths ?? -1),
-  prison: (a, b) => (b.prisonMonths ?? -1) - (a.prisonMonths ?? -1) || (b.severity ?? -Infinity) - (a.severity ?? -Infinity),
-  date: (a, b) => String(b.date ?? '').localeCompare(String(a.date ?? '')),
+// Cases without the value sort last in either direction.
+const byNumber = (field, dir) => (a, b) => {
+  const x = a[field];
+  const y = b[field];
+  if (x == null || y == null) return (x == null) - (y == null);
+  return dir === 'asc' ? x - y : y - x;
 };
+
+function comparator(p) {
+  if (p.sort === 'date') return (a, b) => String(b.date ?? '').localeCompare(String(a.date ?? ''));
+  const dir = sortDirection(p);
+  const [first, second] = p.sort === 'prison' ? ['prisonMonths', 'severity'] : ['severity', 'prisonMonths'];
+  const primary = byNumber(first, dir);
+  const secondary = byNumber(second, dir);
+  return (a, b) => primary(a, b) || secondary(a, b);
+}
 
 export async function searchSentencing(p, { page = 1, signal } = {}) {
   const filter = buildSentencingFilter(p);
@@ -204,7 +222,7 @@ export async function searchSentencing(p, { page = 1, signal } = {}) {
   };
   // A custom sort combined with text_query times out upstream; sort locally instead.
   if (p.text_query) Object.assign(base, { text_query: p.text_query, snippet_fragments: 1, snippet_chars: 240 });
-  else base.sort = SORTS[p.sort ?? 'severity'];
+  else base.sort = `${sortDirection(p) === 'desc' ? '-' : ''}${SORT_FIELDS[p.sort ?? 'severity']}`;
 
   for (let attempt = 0; attempt < 6; attempt++) {
     const fields = RESULT_FIELDS.filter((f) => !rejectedFields.has(f));
@@ -214,7 +232,7 @@ export async function searchSentencing(p, { page = 1, signal } = {}) {
         ...normalizeRuling(item),
         snippet: item.snippet_text ?? item.snippet ?? null,
       }));
-      items.sort(COMPARATORS[p.sort ?? 'severity']);
+      items.sort(comparator(p));
       return {
         total: data.total ?? null,
         timedOut: Boolean(data.timed_out),
@@ -282,26 +300,43 @@ export function normalizeGuideline(g) {
   };
 }
 
+// The API filters by one source substring. A few chosen sources are fetched one request each; many are fetched
+// unfiltered with a larger page. Either way only exact source matches are kept, since a substring such as
+// "השירות המשפטי הציבורי" also matches "כללי, השירות המשפטי הציבורי".
+const PER_SOURCE_REQUESTS_MAX = 4;
+
 export async function searchGuidelines(p, { signal } = {}) {
   const queries = p.queries?.length ? p.queries : [null];
-  const lists = await Promise.all(queries.map((q) =>
-    // total_mode=skip: the exact count costs a second full scan upstream (~27 s on a broad query)
-    // and we only show the cards, so the count comes back null.
+  const sources = [...new Set(p.sources ?? [])];
+  const perSource = sources.length > 0 && sources.length <= PER_SOURCE_REQUESTS_MAX;
+  const requests = queries.flatMap((q) => (perSource
+    ? sources.map((source) => ({ q, source, limit: p.limit ?? 15 }))
+    : [{ q, source: sources.length ? undefined : p.source, limit: sources.length ? 50 : p.limit ?? 15 }]));
+
+  const lists = await Promise.all(requests.map((r) =>
+    // total_mode=skip: the exact count costs a second full scan upstream and only cards are shown.
     guidelinesRequest('/api/public/over-guidelines/documents', {
-      q, topic: p.topic, source: p.source, limit: p.limit ?? 15, skip: 0,
+      q: r.q, topic: p.topic, source: r.source, limit: r.limit, skip: 0,
       total_mode: p.totalMode === 'exact' ? 'exact' : 'skip', // exact only for the boot A/B measurement
     }, { signal })));
+
+  const wanted = sources.length ? new Set(sources) : null;
   const byId = new Map();
   lists.forEach((list, i) => {
+    const q = requests[i].q;
     for (const g of list.items ?? []) {
-      const existing = byId.get(g.id);
-      if (existing) existing.matchedQueries.push(queries[i]);
-      else byId.set(g.id, { ...normalizeGuideline(g), matchedQueries: [queries[i]].filter(Boolean) });
+      const item = normalizeGuideline(g);
+      if (wanted && !wanted.has(item.source)) continue;
+      const existing = byId.get(item.id);
+      if (existing) { if (q && !existing.matchedQueries.includes(q)) existing.matchedQueries.push(q); }
+      else byId.set(item.id, { ...item, matchedQueries: [q].filter(Boolean) });
     }
   });
-  const items = [...byId.values()].sort((a, b) => b.matchedQueries.length - a.matchedQueries.length);
+  const limit = p.limit ?? 15;
+  const items = [...byId.values()].sort((a, b) => b.matchedQueries.length - a.matchedQueries.length).slice(0, Math.max(limit, 25));
   return {
-    totals: lists.map((list, i) => ({ query: queries[i], total: list.total ?? null })),
+    totals: queries.map((q) => ({ query: q, total: sources.length ? null : lists[requests.findIndex((r) => r.q === q)]?.total ?? null })),
+    sources: sources.length ? sources : null,
     items,
   };
 }

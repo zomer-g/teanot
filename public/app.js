@@ -132,7 +132,7 @@ const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const PASTED_DOCUMENT_CHARS = 1500;
 
 // following = id of a conversation whose turn is still running on the server after the stream was lost.
-const state = { me: null, conversations: [], currentId: null, busy: false, controller: null, following: null, file: null };
+const state = { me: null, conversations: [], currentId: null, busy: false, controller: null, following: null, file: null, searchSetup: null };
 const root = document.getElementById('root');
 let ui = {};
 
@@ -326,7 +326,7 @@ function showWelcome() {
     h('ol', { class: 'steps' },
       step('1', 'צירוף המסמך', 'כתב אישום או הכרעת דין, כקובץ או כטקסט.'),
       step('2', 'זיהוי העבירות', 'סעיפים ונתונים מהותיים לכל נאשם, כמו סוג הסם וכמותו.'),
-      step('3', 'גזרי דין והנחיות', 'ממוינים מהעונש החמור לקל, עם שאלות למיקוד החיפוש.'))));
+      step('3', 'גזרי דין והנחיות', 'ממוינים לפי חומרת העונש, עם סינון לפי נתוני גזירת העונש ומקורות ההנחיות.'))));
 }
 
 function setBusy(busy) {
@@ -418,6 +418,7 @@ function newConversation({ focusComposer = true } = {}) {
   if (state.controller) return;
   stopFollowing();
   state.currentId = null;
+  state.searchSetup = null;
   document.title = APP_TITLE;
   history.replaceState(null, '', location.pathname);
   showWelcome();
@@ -436,6 +437,7 @@ async function openConversation(id, { focusThread = false } = {}) {
 
 function renderConversation({ conversation, turns, running, lastRequest }, { focusThread = false } = {}) {
   state.currentId = conversation.id;
+  state.searchSetup = conversation.search_setup ?? null;
   const title = conversation.title || 'שיחה ללא כותרת';
   document.title = `${title} · ${APP_TITLE}`;
   history.replaceState(null, '', `#c=${conversation.id}`);
@@ -1002,7 +1004,7 @@ function renderResults(data, block) {
   return h('section', { class: 'results', 'aria-labelledby': headingId },
     h('div', { class: 'results-head' },
       h('h3', { id: headingId, text: `גזרי דין · ${data.label}` }),
-      h('p', { class: 'results-query', text: `${count} · ממוינים מהעונש החמור לקל` })),
+      h('p', { class: 'results-query', text: `${count} · ${data.params?.sort === 'date' ? 'מהחדש לישן' : data.params?.sort_direction === 'desc' ? 'ממוינים מהעונש החמור לקל' : 'ממוינים מהעונש הקל לחמור'}` })),
     items.length ? list : h('div', { class: 'notice-box', text: 'לא נמצאו גזרי דין התואמים את החיפוש.' }),
     more);
 }
@@ -1034,7 +1036,140 @@ function renderGuidelines(data) {
 
 function disableQuestions(section) {
   section.classList.add('answered');
-  section.querySelectorAll('button, input').forEach((el) => { el.disabled = true; });
+  section.querySelectorAll('button, input, select').forEach((el) => { el.disabled = true; });
+}
+
+// ---------- Search setup: the form shown for the "mode" question ----------
+
+let searchOptionsPromise = null;
+function loadSearchOptions() {
+  searchOptionsPromise ??= fetch('/api/search-options')
+    .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+    .catch((err) => { searchOptionsPromise = null; throw err; });
+  return searchOptionsPromise;
+}
+
+const FLAG_CHOICES = [['', 'הכל'], ['true', 'כן'], ['false', 'לא']];
+const clip = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+// Returns { el, answer() }. answer() gives { answer } for the chat API or { error, focus } when nothing is ticked.
+function renderSearchSetup(q, { live, prior }) {
+  const id = nextId('setup');
+  const textId = `${id}-text`;
+  const sentencing = h('input', { type: 'checkbox', id: `${id}-sentencing`, checked: prior ? prior.mode !== 'guidelines' : true });
+  const guidelines = h('input', { type: 'checkbox', id: `${id}-guidelines`, checked: prior ? prior.mode !== 'sentencing' : false });
+  const kind = (input, title, description) => h('label', { class: 'setup-kind', for: input.id },
+    input, h('span', { class: 'setup-kind-text' }, h('strong', { text: title }), h('span', { text: description })));
+
+  const sortName = `${id}-sort`;
+  const chosenSort = prior?.sentencing?.sort_direction ?? 'asc';
+  const sortOption = (value, label) => {
+    const radioId = `${sortName}-${value}`;
+    return h('label', { class: 'setup-radio', for: radioId },
+      h('input', { type: 'radio', name: sortName, id: radioId, value, checked: chosenSort === value }), h('span', { text: label }));
+  };
+
+  const flagSelects = new Map();
+  const sourceBoxes = new Map();
+  const flagsGrid = h('div', { class: 'setup-flags' }, h('p', { class: 'small muted', text: 'טוען את נתוני גזירת העונש…' }));
+  const sourcesList = h('div', { class: 'setup-sources' }, h('p', { class: 'small muted', text: 'טוען את רשימת המקורות…' }));
+
+  const sentencingPanel = h('div', { class: 'setup-panel' },
+    h('fieldset', { class: 'setup-fieldset' },
+      h('legend', { text: 'סדר התוצאות' }),
+      h('div', { class: 'setup-radios' }, sortOption('asc', 'מהעונש הקל לחמור'), sortOption('desc', 'מהעונש החמור לקל'))),
+    h('fieldset', { class: 'setup-fieldset' },
+      h('legend', { text: 'גזירת העונש' }),
+      h('p', { class: 'question-help', text: '"הכל" משאיר את הנתון פתוח; "כן" או "לא" מצמצמים את התוצאות.' }),
+      flagsGrid));
+
+  const allSources = h('button', { class: 'link-btn', type: 'button', onClick: () => {
+    const anyUnchecked = [...sourceBoxes.values()].some((box) => !box.checked);
+    sourceBoxes.forEach((box) => { box.checked = anyUnchecked; });
+    announce(anyUnchecked ? 'כל המקורות סומנו.' : 'הסימון הוסר מכל המקורות.');
+  } }, 'סימון או ניקוי של כל המקורות');
+  const guidelinesPanel = h('div', { class: 'setup-panel' },
+    h('fieldset', { class: 'setup-fieldset' },
+      h('legend', { text: 'מקורות ההנחיות' }),
+      h('p', { class: 'question-help', text: 'אם לא נבחר מקור, יוחזרו הנחיות מכל המקורות.' }),
+      sourcesList,
+      h('div', { style: 'margin-top:6px' }, allSources)));
+
+  loadSearchOptions().then((options) => {
+    flagsGrid.replaceChildren(...options.sentencingFlags.map((flag) => {
+      const selectId = nextId('flag');
+      const current = prior?.sentencing?.flags?.[flag.key];
+      const select = h('select', { class: 'select', id: selectId, disabled: !live },
+        FLAG_CHOICES.map(([value, label]) => h('option', { value, selected: String(current ?? '') === value }, label)));
+      flagSelects.set(flag.key, { select, label: flag.label });
+      return h('div', { class: 'setup-flag' }, h('label', { class: 'label', for: selectId, text: flag.label }), select);
+    }));
+    const chosen = new Set(prior?.guidelines?.sources ?? []);
+    sourcesList.replaceChildren(...(options.guidelineSources.length
+      ? options.guidelineSources.map((source) => {
+        const boxId = nextId('source');
+        const box = h('input', { type: 'checkbox', id: boxId, checked: chosen.has(source.value), disabled: !live });
+        sourceBoxes.set(source.value, box);
+        return h('label', { class: 'setup-source', for: boxId }, box,
+          h('span', { text: source.value }), source.count != null ? h('span', { class: 'muted', text: ` (${fmtNumber(source.count)})` }) : null);
+      })
+      : [h('p', { class: 'small', text: 'רשימת המקורות אינה זמינה כרגע; החיפוש יכלול את כל המקורות.' })]));
+    allSources.hidden = !options.guidelineSources.length;
+  }).catch(() => {
+    flagsGrid.replaceChildren(h('p', { class: 'small', text: 'נתוני גזירת העונש אינם זמינים כרגע. אפשר לחפש גם בלעדיהם.' }));
+    sourcesList.replaceChildren(h('p', { class: 'small', text: 'רשימת המקורות אינה זמינה כרגע; החיפוש יכלול את כל המקורות.' }));
+    allSources.hidden = true;
+  });
+
+  const sync = () => {
+    sentencingPanel.hidden = !sentencing.checked;
+    guidelinesPanel.hidden = !guidelines.checked;
+  };
+  sentencing.addEventListener('change', sync);
+  guidelines.addEventListener('change', sync);
+  sync();
+  if (!live) [sentencing, guidelines].forEach((box) => { box.disabled = true; });
+
+  const el = h('div', { class: 'question search-setup', role: 'group', 'aria-labelledby': textId },
+    h('p', { class: 'question-text', id: textId, text: q.text || 'מה לחפש?' }),
+    h('div', { class: 'setup-kinds' },
+      kind(sentencing, 'גזרי דין', 'גזרי דין בעבירות דומות, עם סינון לפי נתוני גזירת העונש'),
+      kind(guidelines, 'הנחיות', 'הנחיות לפי הגוף שפרסם אותן')),
+    sentencingPanel,
+    guidelinesPanel);
+
+  const answer = () => {
+    if (!sentencing.checked && !guidelines.checked) return { error: 'יש לסמן גזרי דין, הנחיות או את שניהם.', focus: sentencing };
+    const mode = sentencing.checked && guidelines.checked ? 'both' : sentencing.checked ? 'sentencing' : 'guidelines';
+    const flags = {};
+    const flagText = [];
+    for (const [key, { select, label }] of flagSelects) {
+      if (!select.value) continue;
+      flags[key] = select.value === 'true';
+      flagText.push(`${label}: ${flags[key] ? 'כן' : 'לא'}`);
+    }
+    const sortDirection = el.querySelector(`input[name="${sortName}"]:checked`)?.value === 'desc' ? 'desc' : 'asc';
+    const sources = [...sourceBoxes].filter(([, box]) => box.checked).map(([value]) => value);
+    // Everything ticked is the same as no filter, and cheaper to search.
+    const sourceFilter = sources.length === sourceBoxes.size ? [] : sources;
+    const summary = [];
+    if (mode !== 'guidelines') summary.push(`גזרי דין (${sortDirection === 'asc' ? 'מהקל לחמור' : 'מהחמור לקל'})`, ...flagText);
+    if (mode !== 'sentencing') summary.push(`הנחיות: ${sourceFilter.length ? sourceFilter.join(', ') : 'כל המקורות'}`);
+    return {
+      answer: {
+        id: q.id,
+        question: clip(q.text || 'מה לחפש?', 500),
+        selected: [{ value: mode, label: clip(summary.join(' · '), 300) }],
+        free_text: null,
+        setup: {
+          mode,
+          ...(mode !== 'guidelines' ? { sentencing: { flags, sort_direction: sortDirection } } : {}),
+          ...(mode !== 'sentencing' ? { guidelines: { sources: sourceFilter } } : {}),
+        },
+      },
+    };
+  };
+  return { el, answer };
 }
 
 function renderQuestions(data, live) {
@@ -1042,24 +1177,48 @@ function renderQuestions(data, live) {
   const freeInputs = new Map();
   const headingId = nextId('questions');
   const section = h('section', { class: 'card questions', 'aria-labelledby': headingId });
+  const setups = new Map(); // question id → search-setup form
+  const formError = h('p', { class: 'error-box', role: 'alert', hidden: true });
 
   const submit = () => {
-    const answers = data.questions.map((q) => ({
-      id: q.id,
-      question: q.text,
-      selected: q.options.filter((o) => selections.get(q.id).has(o.value)).map((o) => ({ value: o.value, label: o.label })),
-      free_text: freeInputs.get(q.id)?.value.trim() || null,
-    }));
+    const answers = [];
+    for (const q of data.questions) {
+      const setup = setups.get(q.id);
+      if (setup) {
+        const result = setup.answer();
+        if (result.error) {
+          formError.textContent = result.error;
+          formError.hidden = false;
+          result.focus?.focus();
+          return;
+        }
+        answers.push(result.answer);
+        state.searchSetup = result.answer.setup;
+        continue;
+      }
+      answers.push({
+        id: q.id,
+        question: q.text,
+        selected: q.options.filter((o) => selections.get(q.id).has(o.value)).map((o) => ({ value: o.value, label: o.label })),
+        free_text: freeInputs.get(q.id)?.value.trim() || null,
+      });
+    }
+    formError.hidden = true;
     ui.textarea.focus(); // the focused option is about to be disabled
     disableQuestions(section);
     send({ answers });
   };
 
   const questionEls = data.questions.map((q) => {
+    if (q.id === 'mode') {
+      const setup = renderSearchSetup(q, { live, prior: state.searchSetup });
+      setups.set(q.id, setup);
+      return setup.el;
+    }
     const selected = selections.get(q.id);
     const textId = nextId('question');
     const helpId = q.help ? nextId('question-help') : null;
-    const immediate = q.style === 'cards' && !q.multiple && data.questions.length === 1;
+    const immediate = q.style === 'cards' && !q.multiple && data.questions.length === 1 && !data.questions.some((x) => x.id === 'mode');
     const hintId = immediate && live ? nextId('question-hint') : null;
     const optionButtons = [];
     const refresh = () => optionButtons.forEach(([btn, value]) => btn.setAttribute('aria-pressed', String(selected.has(value))));
@@ -1096,12 +1255,13 @@ function renderQuestions(data, live) {
       free);
   });
 
-  const needsButton = !(data.questions.length === 1 && data.questions[0].style === 'cards' && !data.questions[0].multiple);
+  const onlyCards = data.questions.length === 1 && data.questions[0].style === 'cards' && !data.questions[0].multiple && !setups.size;
   section.append(
     h('h3', { id: headingId, text: data.intro || 'כדי למקד את החיפוש' }),
     ...questionEls,
+    formError,
     h('div', { class: 'questions-actions' },
-      needsButton ? h('button', { class: 'btn btn-primary btn-sm', type: 'button', onClick: submit }, 'שליחת תשובות') : null));
+      onlyCards ? null : h('button', { class: 'btn btn-primary', type: 'button', onClick: submit }, setups.size ? 'חיפוש' : 'שליחת תשובות')));
   if (!live) disableQuestions(section);
   return section;
 }

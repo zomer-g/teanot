@@ -2,6 +2,7 @@
 import { query } from './db.js';
 import { activeModel, streamModel } from './llm/index.js';
 import { getQuota, recordModelUsage } from './usage.js';
+import { loadSearchSetup } from './search-options.js';
 import { TOOLS, askUserSchema, executeTool, validationError } from './tools.js';
 
 const MAX_ITERATIONS = 12;
@@ -14,16 +15,16 @@ export const SYSTEM_PROMPT = `You are the research assistant of the Zomer law of
 
 2. Extract, for each defendant, every count: the offense, the law, the section as written, separate section tokens, and the facts that drive sentencing — drug type and quantity with unit, sums of money, weapon, injury, number of victims, period of time, the defendant's role. In an indictment these are the charges; in a verdict they are the convictions, with any acquittal marked. Record drug quantities per drug, converted to grams for kg or mg; pills, blotters, plants and doses are units.
 
-3. Decide what to search. If the user hasn't said whether they want sentencing decisions or guidelines, ask with ask_user (question id "mode", style "cards", options: sentencing, guidelines, both). If several defendants face materially different counts, ask which defendant to research, with an "all defendants" option when a shared search makes sense. Put these in a single ask_user call.
+3. Decide what to search. If the user hasn't said whether they want sentencing decisions or guidelines, ask with ask_user (question id "mode", style "cards", options: sentencing, guidelines, both). The app shows this question as a search-setup form: the user ticks sentencing decisions and/or guidelines, and for sentencing chooses yes/no sentencing flags (confessed, agreed sentence, criminal record, deviation from the range and so on) and the severity order, and for guidelines chooses the issuing sources. Its answer carries a "setup" object. The app applies that setup to every search in this conversation by itself, so don't ask about those flags, the order or the sources again, and don't pass conflicting values; say in your summary which of them were applied. If several defendants face materially different counts, ask which defendant to research, with an "all defendants" option when a shared search makes sense. Put these in a single ask_user call.
 
 4. Run an initial search, then refine. Build the first query yourself from the analysis; don't ask about parameters you can reasonably default:
    - Drug quantity: a range of about ±33% around the defendant's quantity of the relevant drug (30 g → 20–40 g).
    - Narrow by topic (meta.topics, e.g. "סמים") and, where a section is distinctive, by section tokens.
-   - Sort by severity.
+   - Sort by severity. The default order is from the most lenient sentence to the most severe; the user's setup can reverse it.
    When you're not sure of the exact stored values (topic names, law names, section tokens, whether a field exists), call get_field_values before filtering on them rather than guessing. If a filter returns an unknown_field error, drop or replace that filter and search again.
    After the results arrive, refine only when it changes the comparison: the set is very broad (hundreds of matches), very thin (fewer than about 5), or the case has an ambiguity that matters (several drugs, possession versus trafficking, an unclear quantity, several defendants, adult versus juvenile court). Then call ask_user with concrete options — for example quantity ranges as chips with your default marked recommended, whether to exclude agreed sentences, court instance, or date range. Don't ask when the results already make a good comparison set.
 
-5. Report. Result cards are displayed to the user automatically, ordered from most to least severe, so don't list the cases one by one. Write a short summary: how many decisions matched, the filters in plain Hebrew, the spread of actual imprisonment (lowest, median, highest), and what separates the severe end from the lenient end, naming a few cases as examples. Point out limits that matter here: quantity and imprisonment are case-level (quantities summed across defendants; imprisonment of the most severe defendant), so a multi-defendant case may not reflect one defendant's exposure; and many decisions lack quantity data, so a quantity filter drops them.
+5. Report. Result cards are displayed to the user automatically, ordered by severity in the chosen direction, so don't list the cases one by one. Write a short summary: how many decisions matched, the filters in plain Hebrew, the spread of actual imprisonment (lowest, median, highest), and what separates the severe end from the lenient end, naming a few cases as examples. Point out limits that matter here: quantity and imprisonment are case-level (quantities summed across defendants; imprisonment of the most severe defendant), so a multi-defendant case may not reflect one defendant's exposure; and many decisions lack quantity data, so a quantity filter drops them.
 
 6. Follow-ups. Answer questions about the results, refine or broaden the search, compare cases, or read a decision or guideline in full with read_document. State facts about a case only from tool results or the documents in this conversation; when the data doesn't show something, say so.
 
@@ -78,6 +79,8 @@ export async function runTurn({ account, conversationId, turnId, userBlocks, use
   // switching models mid-turn does not split one answer across two models.
   const llm = await activeModel();
   const history = await loadHistory(conversationId);
+  // Saved by the chat route from this turn's answers (if any) before the turn starts.
+  const searchSetup = await loadSearchSetup(conversationId);
   const userContent = [...pendingToolResults(history, answers), ...userBlocks];
   if (!userContent.length) throw new Error('empty_turn');
   await saveMessage(conversationId, 'user', userContent, userUi);
@@ -150,7 +153,7 @@ export async function runTurn({ account, conversationId, turnId, userBlocks, use
         if (parsed.success) asks.push({ toolUse, data: parsed.data });
         else tasks.push(Promise.resolve(validationError(toolUse, parsed.error.issues)));
       } else {
-        tasks.push(executeTool(toolUse, { account, conversationId, turnId, emit, signal }));
+        tasks.push(executeTool(toolUse, { account, conversationId, turnId, emit, signal, searchSetup }));
       }
     }
     const results = await Promise.all(tasks);

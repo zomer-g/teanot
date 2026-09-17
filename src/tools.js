@@ -90,7 +90,10 @@ export const sentencingParamsSchema = z.object({
   confessed: z.boolean().nullable().optional(),
   agreed_sentence: z.boolean().nullable().optional(),
   text_query: optText.describe('Optional full-text query over the decision text: space = AND, "exact phrase", -exclude, OR. Slower; use only when meta filters cannot express the need'),
+  flags: z.record(z.string().regex(/^meta\.[a-z0-9_]{1,60}$/), z.boolean()).optional()
+    .describe('Yes/no sentencing flags as meta.* key → true/false. The user\'s search setup already sets these; add one only if the user asks for it in conversation'),
   sort: z.enum(['severity', 'prison', 'date']).default('severity'),
+  sort_direction: z.enum(['asc', 'desc']).default('asc').describe('asc = most lenient first (default), desc = most severe first. The user\'s search setup overrides this'),
   size: z.number().int().min(1).max(50).default(30),
 });
 
@@ -98,7 +101,8 @@ export const guidelinesParamsSchema = z.object({
   label: text.max(160).describe('Short Hebrew label shown above the results'),
   queries: z.array(text.min(2)).min(1).max(4).describe('Short Hebrew substrings searched in title and body; results are merged'),
   topic: optText.describe('Substring of the guideline topic field'),
-  source: optText.describe('Substring of the issuing body, e.g. "פרקליט המדינה", "היועץ המשפטי לממשלה"'),
+  source: optText.describe('Substring of the issuing body, e.g. "פרקליט המדינה", "היועץ המשפטי לממשלה". Ignored when the user chose sources in the search setup'),
+  sources: z.array(text).max(50).optional().describe('Exact source labels; normally set from the user\'s search setup'),
   limit: z.number().int().min(1).max(25).default(15),
 });
 
@@ -225,6 +229,26 @@ export function sentencingForModel(result, params) {
 
 // ---------- Executors ----------
 
+// The user's search setup wins over the model's parameters, so a choice made in the form cannot be dropped or
+// contradicted by the model. Model-set confessed/agreed_sentence give way to the same flag chosen by the user.
+export function withSentencingSetup(params, setup) {
+  const chosen = setup?.sentencing;
+  if (!chosen) return params;
+  const flags = { ...(params.flags ?? {}), ...chosen.flags };
+  return {
+    ...params,
+    flags,
+    confessed: 'meta.confessed' in flags ? null : params.confessed,
+    agreed_sentence: 'meta.agreed_sentence' in flags ? null : params.agreed_sentence,
+    sort_direction: chosen.sort_direction ?? params.sort_direction,
+  };
+}
+
+export function withGuidelinesSetup(params, setup) {
+  const sources = setup?.guidelines?.sources ?? [];
+  return sources.length ? { ...params, sources, source: undefined } : params;
+}
+
 export async function executeTool(toolUse, ctx) {
   const { account, conversationId, turnId, emit, signal } = ctx;
   const activity = (label, state, extra = {}) => emit({ type: 'activity', id: toolUse.id, label, state, ...extra });
@@ -251,7 +275,7 @@ export async function executeTool(toolUse, ctx) {
     case 'search_sentencing_decisions': {
       const parsed = sentencingParamsSchema.safeParse(toolUse.input);
       if (!parsed.success) return validationError(toolUse, parsed.error.issues);
-      const params = parsed.data;
+      const params = withSentencingSetup(parsed.data, ctx.searchSetup);
       const label = `מחפש גזרי דין: ${params.label}`;
       activity(label, 'running');
       try {
@@ -260,7 +284,7 @@ export async function executeTool(toolUse, ctx) {
         const data = { label: params.label, params, total: result.total, page: result.page, size: result.size, items: result.items };
         activity(label, 'done', { summary: result.total != null ? `${result.total} תוצאות` : `${result.items.length} תוצאות` });
         emit({ type: 'results', toolUseId: toolUse.id, data });
-        return { block: toolResult(toolUse, sentencingForModel(result, params)), ui: { type: 'results', data } };
+        return { block: toolResult(toolUse, { ...sentencingForModel(result, params), applied_user_setup: ctx.searchSetup?.sentencing ?? null }), ui: { type: 'results', data } };
       } catch (err) {
         if (signal?.aborted) throw err;
         await recordTagitCall({ account, conversationId, turnId, detail: { action: 'search_sentencing', label: params.label, error: tagitErrorMessage(err) } });
@@ -272,7 +296,7 @@ export async function executeTool(toolUse, ctx) {
     case 'search_guidelines': {
       const parsed = guidelinesParamsSchema.safeParse(toolUse.input);
       if (!parsed.success) return validationError(toolUse, parsed.error.issues);
-      const params = parsed.data;
+      const params = withGuidelinesSetup(parsed.data, ctx.searchSetup);
       const label = `מחפש הנחיות: ${params.label}`;
       activity(label, 'running');
       try {
@@ -285,6 +309,7 @@ export async function executeTool(toolUse, ctx) {
           block: toolResult(toolUse, {
             label: params.label,
             totals: result.totals,
+            sources_filter: result.sources,
             items: result.items.map((g) => ({
               id: g.id, title: g.title, number: g.number, source: g.source, topic: g.topic, date: g.date,
               matched_queries: g.matchedQueries, summary: truncate(g.summary, 400),

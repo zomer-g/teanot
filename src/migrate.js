@@ -86,6 +86,9 @@ CREATE INDEX IF NOT EXISTS turns_conversation ON turns (conversation_id, id DESC
 ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS turn_id INTEGER;
 CREATE INDEX IF NOT EXISTS usage_events_turn ON usage_events (turn_id);
 
+-- Search setup chosen in the conversation's form (sentencing flags, severity order, guideline sources).
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS search_setup JSONB;
+
 -- Language-model calls from any provider are kind 'llm'; rows written before providers existed are 'claude'.
 ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS provider TEXT;
 UPDATE usage_events SET provider = 'anthropic' WHERE kind = 'claude' AND provider IS NULL;

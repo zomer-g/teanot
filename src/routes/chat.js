@@ -12,7 +12,8 @@ import { QuotaExceededError, assertQuota, getQuota, recordTagitCall } from '../u
 import { finishTurn, lastTurn, startTurn } from '../turns.js';
 import { rateLimit } from '../security.js';
 import { runTurn } from '../agent.js';
-import { sentencingParamsSchema } from '../tools.js';
+import { sentencingParamsSchema, withSentencingSetup } from '../tools.js';
+import { getGuidelineSources, getSentencingFlags, loadSearchSetup, saveSearchSetup, searchSetupSchema } from '../search-options.js';
 import * as tagit from '../tagit.js';
 
 export const chatRouter = Router();
@@ -34,6 +35,7 @@ const answersSchema = z.array(z.object({
   question: z.string().max(500),
   selected: z.array(z.object({ value: z.string().max(200), label: z.string().max(300) })).max(10).default([]),
   free_text: z.string().max(2000).nullable().optional(),
+  setup: searchSetupSchema.optional(), // the search-setup form's structured answer to the "mode" question
 })).min(1).max(4);
 
 // conversationId → { controller, userId, turnId, events, listeners, reconnects, emit }. A turn keeps running
@@ -69,7 +71,7 @@ function reserveTurnSlot(req, res, next) {
 async function ownConversation(account, id) {
   if (!UUID_RE.test(id ?? '')) return null;
   const { rows } = await query(
-    'SELECT id, title, doc_name, analysis FROM conversations WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL',
+    'SELECT id, title, doc_name, analysis, search_setup FROM conversations WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL',
     [id, account.id],
   );
   return rows[0] ?? null;
@@ -198,6 +200,8 @@ chatRouter.post('/chat', requireActive, rateLimit({ name: 'chat', limit: 30, win
     conversation = rows[0];
   }
   if (activeTurns.has(conversation.id)) return res.status(409).json({ error: 'turn_in_progress' });
+  const setupAnswer = answers?.find((a) => a.setup);
+  if (setupAnswer) await saveSearchSetup(conversation.id, setupAnswer.setup);
 
   const controller = new AbortController();
   // Every event is numbered and kept for the life of the turn, so a browser whose connection was
@@ -307,6 +311,13 @@ export async function drainActiveTurns(timeoutMs) {
 const tagitLimit = rateLimit({ name: 'tagit', limit: 120, windowMs: TEN_MINUTES });
 
 // "Show more" on a result card: fetches the next page without spending model tokens.
+// Options for the search-setup form: sentencing flags (from the Z-G site's config) and guideline sources.
+chatRouter.get('/search-options', requireActive, async (_req, res) => {
+  const [{ flags, source }, guidelineSources] = await Promise.all([getSentencingFlags(), getGuidelineSources()]);
+  res.set('Cache-Control', 'private, max-age=300');
+  res.json({ sentencingFlags: flags, flagsSource: source, guidelineSources, defaults: { sortDirection: 'asc' } });
+});
+
 chatRouter.post('/tagit/sentencing/more', requireActive, tagitLimit, async (req, res) => {
   const conversation = await ownConversation(req.account, req.body?.conversationId);
   if (!conversation) return res.status(404).json({ error: 'not_found' });
@@ -317,7 +328,8 @@ chatRouter.post('/tagit/sentencing/more', requireActive, tagitLimit, async (req,
     account: req.account, conversationId: conversation.id, kind: 'more', text: `${parsed.data.label} · עמוד ${page}`,
   });
   try {
-    const result = await tagit.searchSentencing(parsed.data, { page });
+    // The same user setup the first page was searched with, even if the browser sent older parameters.
+    const result = await tagit.searchSentencing(withSentencingSetup(parsed.data, await loadSearchSetup(conversation.id)), { page });
     await recordTagitCall({ account: req.account, conversationId: conversation.id, turnId, detail: { action: 'more_sentencing', label: parsed.data.label, page, total: result.total, returned: result.items.length } });
     await finishTurn(turnId, 'completed');
     res.json({ page: result.page, total: result.total, items: result.items });
