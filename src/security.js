@@ -9,7 +9,6 @@ const CSP = [
   "script-src 'self'",
   "style-src 'self'",
   "img-src 'self'",
-  "media-src 'self'", // the demo video on the sign-in screen
   "font-src 'self'",
   "connect-src 'self'",
   "manifest-src 'self'",
