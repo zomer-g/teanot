@@ -150,7 +150,7 @@ async function boot() {
   }
   if (!me.authenticated) {
     return renderGate('כניסה למערכת', 'המערכת זמינה למשתמשים מורשים בלבד. יש להתחבר עם חשבון Google.',
-      h('a', { class: 'btn btn-accent', href: me.loginUrl }, 'התחברות'));
+      h('a', { class: 'btn btn-accent', href: me.loginUrl }, 'התחברות'), demoVideo());
   }
   state.me = me;
   renderHeader();
@@ -169,15 +169,50 @@ async function boot() {
   if (match) openConversation(match[1]);
 }
 
-function renderGate(title, body, action) {
+function renderGate(title, body, action, extra = null) {
   document.title = `${title} · ${APP_TITLE}`;
-  root.replaceChildren(h('main', { class: 'gate', id: 'content', tabindex: '-1' },
+  root.replaceChildren(h('main', { class: `gate${extra ? ' gate-with-demo' : ''}`, id: 'content', tabindex: '-1' },
     h('div', { class: 'gate-card' },
       h('img', { src: '/icon.svg', alt: '', width: 56, height: 56 }),
       h('h1', { text: title }),
       h('p', { text: body }),
       action,
-      policyLinks('gate-links'))));
+      policyLinks('gate-links')),
+    extra));
+}
+
+// A recorded run of the real system on a fictional indictment, shown before sign-in. It has no sound, so the
+// steps are also written out (WCAG 1.2.1); it plays only when the visitor starts it.
+const DEMO_STEPS = [
+  'מצרפים כתב אישום (קובץ Word) ושולחים.',
+  'המערכת מזהה שמדובר בכתב אישום, ומפרטת את הנאשם, שלושת סעיפי האישום והנתונים המהותיים: סוג הנשק, מספר היריות, הפגיעה והרקע לאירוע.',
+  'בטופס החיפוש מסמנים גזרי דין וגם הנחיות. סדר התוצאות נשאר מהעונש הקל לחמור, בנתוני גזירת העונש נבחר "הוטל מאסר בפועל: כן", וממקורות ההנחיות נבחרו היועצת המשפטית לממשלה ופרקליט המדינה.',
+  'המערכת מחפשת במאגר TAG\u2011IT ומציגה 198 גזרי דין תואמים, ממוינים מהעונש הקל לחמור, לצד הנחיות מהמקורות שנבחרו.',
+  'בסיום מוצג סיכום בכתב: טווח המאסר בתיקים שהוצגו, הערות על הסדרי טיעון, והפניה להנחיית פרקליט המדינה 9.16 בעניין מדיניות ענישה בעבירות נשק.',
+];
+
+function demoVideo() {
+  const titleId = nextId('demo-title');
+  const stepsId = nextId('demo-steps');
+  return h('section', { class: 'gate-demo', 'aria-labelledby': titleId },
+    h('h2', { id: titleId, text: 'הדגמה: מכתב אישום לגזרי דין והנחיות' }),
+    h('p', { class: 'gate-demo-note', text: 'כתב אישום בדוי בעבירות ירי ונשק. גזרי הדין וההנחיות הם אלה שהמערכת החזירה בפועל מהמאגר. ללא קול, כ-75 שניות.' }),
+    h('video', {
+      class: 'gate-demo-video',
+      src: '/demo/teanot-demo.mp4',
+      poster: '/demo/teanot-demo-poster.webp',
+      controls: true,
+      preload: 'none',
+      playsinline: true,
+      muted: true,
+      width: 1280,
+      height: 800,
+      'aria-label': 'סרטון הדגמה של המערכת',
+      'aria-describedby': stepsId,
+    }),
+    h('details', { class: 'gate-demo-details' },
+      h('summary', { text: 'מה רואים בסרטון' }),
+      h('ol', { id: stepsId }, DEMO_STEPS.map((step) => h('li', { text: step })))));
 }
 
 function renderHeader() {
