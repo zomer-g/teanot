@@ -206,6 +206,8 @@ export function sentencingForModel(result, params) {
   return {
     label: params.label,
     total_matches: result.total,
+    // total_matches counts documents; one decision can have several copies, which are removed from items.
+    duplicate_copies_removed: result.duplicatesRemoved || undefined,
     total_timed_out: result.timedOut || undefined,
     page: result.page,
     returned: result.items.length,

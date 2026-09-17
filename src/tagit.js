@@ -210,6 +210,18 @@ function comparator(p) {
   return (a, b) => primary(a, b) || secondary(a, b);
 }
 
+// TAG-IT can hold several documents for one decision (re-imports, copies per defendant). The same title, date and
+// actual prison term is treated as one decision, and the first copy is kept.
+function withoutDuplicateDecisions(items) {
+  const seen = new Set();
+  return items.filter((item) => {
+    const key = [String(item.title ?? '').replace(/[\s()]/g, ''), item.date ?? '', item.prisonMonths ?? ''].join('|');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export async function searchSentencing(p, { page = 1, signal } = {}) {
   const filter = buildSentencingFilter(p);
   const base = {
@@ -233,13 +245,15 @@ export async function searchSentencing(p, { page = 1, signal } = {}) {
         snippet: item.snippet_text ?? item.snippet ?? null,
       }));
       items.sort(comparator(p));
+      const unique = withoutDuplicateDecisions(items);
       return {
         total: data.total ?? null,
+        duplicatesRemoved: items.length - unique.length,
         timedOut: Boolean(data.timed_out),
         page: data.page ?? page,
         size: data.size ?? base.size,
         filter,
-        items,
+        items: unique,
       };
     } catch (err) {
       const field = err instanceof TagitError && err.status === 400 && err.body?.error === 'unknown_field' ? err.body.field : null;
@@ -333,14 +347,15 @@ export async function searchGuidelines(p, { signal } = {}) {
     }
   });
   // Substring matches in the body are weak evidence: rank title matches first, then by how many queries matched,
-  // and keep single body-only matches only when there is too little else to show.
+  // and show single body-only matches only when there is nothing stronger.
   const limit = p.limit ?? 15;
   const lower = (s) => String(s ?? '').toLowerCase();
   const ranked = [...byId.values()]
     .map((g) => ({ ...g, titleMatches: g.matchedQueries.filter((q) => lower(g.title).includes(lower(q))).length }))
     .sort((a, b) => b.titleMatches - a.titleMatches || b.matchedQueries.length - a.matchedQueries.length);
   const strong = ranked.filter((g) => g.titleMatches > 0 || g.matchedQueries.length > 1);
-  const items = (strong.length >= Math.min(5, ranked.length) ? strong : ranked).slice(0, limit)
+  // Weak matches only when nothing better was found: a short relevant list beats a long noisy one.
+  const items = (strong.length ? strong : ranked).slice(0, limit)
     .map(({ titleMatches, ...g }) => g);
   return {
     totals: queries.map((q) => ({ query: q, total: sources.length ? null : lists[requests.findIndex((r) => r.q === q)]?.total ?? null })),
