@@ -454,6 +454,7 @@ function newConversation({ focusComposer = true } = {}) {
   stopFollowing();
   state.currentId = null;
   state.searchSetup = null;
+  resetCitations();
   document.title = APP_TITLE;
   history.replaceState(null, '', location.pathname);
   showWelcome();
@@ -473,6 +474,13 @@ async function openConversation(id, { focusThread = false } = {}) {
 function renderConversation({ conversation, turns, running, lastRequest }, { focusThread = false } = {}) {
   state.currentId = conversation.id;
   state.searchSetup = conversation.search_setup ?? null;
+  resetCitations();
+  for (const turn of turns) {
+    for (const item of turn.ui?.items ?? []) {
+      if (item.type === 'results') registerRulings(item.data?.items);
+      if (item.type === 'guidelines') registerGuidelines(item.data?.items);
+    }
+  }
   const title = conversation.title || 'שיחה ללא כותרת';
   document.title = `${title} · ${APP_TITLE}`;
   history.replaceState(null, '', `#c=${conversation.id}`);
@@ -792,13 +800,14 @@ function createAssistantBlock(conversationId) {
         renderPending = true;
         requestAnimationFrame(() => {
           renderPending = false;
-          if (textEl) { textEl.innerHTML = markdown(textBuffer); enhanceTables(textEl); scrollToBottom(); }
+          if (textEl) { textEl.innerHTML = markdown(textBuffer); linkCitations(textEl); enhanceTables(textEl); scrollToBottom(); }
         });
       }
     },
     endSegment() {
       if (textEl) {
         textEl.innerHTML = markdown(textBuffer);
+        linkCitations(textEl);
         enhanceTables(textEl);
         decorateLinks(textEl);
         textEl.classList.remove('cursor');
@@ -836,6 +845,7 @@ function createAssistantBlock(conversationId) {
       let el = null;
       if (item.type === 'text') {
         el = h('div', { class: 'assistant-text', svg: markdown(item.text) });
+        linkCitations(el);
         enhanceTables(el);
         decorateLinks(el);
       } else if (item.type === 'analysis') {
@@ -984,6 +994,7 @@ function renderRuling(r, rank) {
 }
 
 function renderResults(data, block) {
+  registerRulings(data.items);
   const PAGE = 10;
   const items = [...data.items];
   let shown = 0;
@@ -1023,6 +1034,7 @@ function renderResults(data, block) {
           const nextPage = await res.json();
           page = nextPage.page;
           if (!nextPage.items.length) { data.total = items.length; }
+          registerRulings(nextPage.items);
           items.push(...nextPage.items);
           renderMore(true);
         } catch {
@@ -1045,6 +1057,7 @@ function renderResults(data, block) {
 }
 
 function renderGuidelines(data) {
+  registerGuidelines(data.items);
   const headingId = nextId('guidelines');
   return h('section', { class: 'results', 'aria-labelledby': headingId },
     h('div', { class: 'results-head' },
@@ -1072,6 +1085,91 @@ function renderGuidelines(data) {
 function disableQuestions(section) {
   section.classList.add('answered');
   section.querySelectorAll('button, input, select').forEach((el) => { el.disabled = true; });
+}
+
+// ---------- Citations in the model's text ----------
+// The model never types case numbers: it writes [[ruling:ID]] / [[guideline:ID]] and the app renders a link
+// labelled from TAG-IT's data. Any case number it still types is kept only if it matches a ruling returned in
+// this conversation; otherwise the number is dropped, since a missing number is better than a wrong one.
+
+const knownRulings = new Map();
+const knownGuidelines = new Map();
+
+const CITATION_TOKEN = /\[\[(ruling|guideline):(\d{1,12})\]\]/g;
+// A court case number with its prefix, e.g. ת"פ 20328-06-25, תפ"ח 1234-05-20, ע"פ 3261/15.
+const TYPED_CASE_NUMBER = /[א-ת]{1,4}["״'׳][א-ת]{1,2}\s*\d{1,6}(?:[-–]\d{1,2}[-–]\d{2,5}|\/\d{2,4})/g;
+const numberSignature = (text) => (String(text).match(/\d+/g) ?? []).map((n) => String(Number(n))).sort().join('|');
+const caseNumbersIn = (text) => String(text ?? '').match(TYPED_CASE_NUMBER) ?? [];
+
+function registerRulings(items) {
+  for (const r of items ?? []) if (r?.id != null) knownRulings.set(String(r.id), r);
+}
+function registerGuidelines(items) {
+  for (const g of items ?? []) if (g?.id != null) knownGuidelines.set(String(g.id), g);
+}
+function resetCitations() {
+  knownRulings.clear();
+  knownGuidelines.clear();
+}
+
+// The number shown for a ruling comes from its title (what its card shows), and only when TAG-IT's separate
+// case-number field does not contradict it.
+function verifiedCaseNumber(r) {
+  const inTitle = caseNumbersIn(r.title);
+  if (!inTitle.length) return null;
+  if (r.caseNumber && !inTitle.some((n) => numberSignature(n) === numberSignature(r.caseNumber))) return null;
+  return inTitle[0];
+}
+
+function knownCaseSignatures() {
+  const signatures = new Set();
+  for (const r of knownRulings.values()) {
+    const number = verifiedCaseNumber(r);
+    if (number) signatures.add(numberSignature(number));
+  }
+  return signatures;
+}
+
+function citationNode(kind, id) {
+  if (kind === 'ruling') {
+    const r = knownRulings.get(id);
+    if (!r) return document.createTextNode('גזר דין');
+    const label = verifiedCaseNumber(r) ?? 'גזר הדין';
+    return externalLink(r.fileUrl, label, `: ${r.title}`);
+  }
+  const g = knownGuidelines.get(id);
+  if (!g) return document.createTextNode('הנחיה');
+  return externalLink(g.fileUrl, g.title.length > 70 ? `${g.title.slice(0, 69)}…` : g.title, '');
+}
+
+function linkCitations(container) {
+  const signatures = knownCaseSignatures();
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => (node.parentElement.closest('a, code, pre') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+  });
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    // While streaming, hide a token that has not finished arriving.
+    const text = node.nodeValue.replace(/\[\[[a-z]*:?\d*\]?$/, '');
+    if (!/\[\[|\d/.test(text)) { if (text !== node.nodeValue) node.nodeValue = text; continue; }
+    const pattern = new RegExp(`${CITATION_TOKEN.source}|${TYPED_CASE_NUMBER.source}`, 'g');
+    const parts = [];
+    let last = 0;
+    let changed = text !== node.nodeValue;
+    for (const match of text.matchAll(pattern)) {
+      let replacement = null;
+      if (match[1]) replacement = citationNode(match[1], match[2]);
+      else if (!signatures.has(numberSignature(match[0]))) replacement = document.createTextNode('גזר דין');
+      if (!replacement) continue;
+      parts.push(document.createTextNode(text.slice(last, match.index)), replacement);
+      last = match.index + match[0].length;
+      changed = true;
+    }
+    if (!changed) continue;
+    parts.push(document.createTextNode(text.slice(last)));
+    node.replaceWith(...parts);
+  }
 }
 
 // ---------- Search setup: the form shown for the "mode" question ----------

@@ -332,8 +332,16 @@ export async function searchGuidelines(p, { signal } = {}) {
       else byId.set(item.id, { ...item, matchedQueries: [q].filter(Boolean) });
     }
   });
+  // Substring matches in the body are weak evidence: rank title matches first, then by how many queries matched,
+  // and keep single body-only matches only when there is too little else to show.
   const limit = p.limit ?? 15;
-  const items = [...byId.values()].sort((a, b) => b.matchedQueries.length - a.matchedQueries.length).slice(0, Math.max(limit, 25));
+  const lower = (s) => String(s ?? '').toLowerCase();
+  const ranked = [...byId.values()]
+    .map((g) => ({ ...g, titleMatches: g.matchedQueries.filter((q) => lower(g.title).includes(lower(q))).length }))
+    .sort((a, b) => b.titleMatches - a.titleMatches || b.matchedQueries.length - a.matchedQueries.length);
+  const strong = ranked.filter((g) => g.titleMatches > 0 || g.matchedQueries.length > 1);
+  const items = (strong.length >= Math.min(5, ranked.length) ? strong : ranked).slice(0, limit)
+    .map(({ titleMatches, ...g }) => g);
   return {
     totals: queries.map((q) => ({ query: q, total: sources.length ? null : lists[requests.findIndex((r) => r.q === q)]?.total ?? null })),
     sources: sources.length ? sources : null,

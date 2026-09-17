@@ -478,7 +478,7 @@ async function openTranscript(id) {
     return h('div', { class: 'transcript-turn' },
       h('h3', { class: 'small', style: 'margin:0', text: `מערכת · ${fmtDateTime(m.created_at)}` }),
       (u.items || []).map((item) => {
-        if (item.type === 'text') return h('div', { class: 'assistant-text', html: markdown(item.text) });
+        if (item.type === 'text') return h('div', { class: 'assistant-text', html: markdown(String(item.text).replace(/\[\[(ruling|guideline):(\d+)\]\]/g, (_, kind, id) => `(${kind === 'ruling' ? 'גזר דין' : 'הנחיה'} #${id})`)) });
         if (item.type === 'analysis') {
           return h('div', { class: 'notice-box' }, `ניתוח: ${item.data.title} · `,
             item.data.defendants.map((d) => `${d.label}: ${d.counts.map((c) => c.section || c.offense).join(', ')}`).join(' | '));

@@ -97,9 +97,15 @@ export const sentencingParamsSchema = z.object({
   size: z.number().int().min(1).max(50).default(30),
 });
 
+// The guidelines API matches a query as a substring anywhere in the text, so a three-letter word ("ירי") or a bare
+// section number ("329") matches hundreds of unrelated directives. Refuse those so the model picks a phrase.
+const guidelineQuery = text
+  .refine((q) => q.trim().length >= 4, 'Too short: substring search on a word under 4 letters matches unrelated directives. Use a distinctive phrase such as "עבירות נשק".')
+  .refine((q) => !(/\d/.test(q) && q.replace(/[\d\s()[\].,/\-]/g, '').length <= 2), 'A bare section number matches any number in any directive. Search for the subject in words instead, e.g. "מדיניות ענישה בעבירות נשק".');
+
 export const guidelinesParamsSchema = z.object({
   label: text.max(160).describe('Short Hebrew label shown above the results'),
-  queries: z.array(text.min(2)).min(1).max(4).describe('Short Hebrew substrings searched in title and body; results are merged'),
+  queries: z.array(guidelineQuery).min(1).max(4).describe('Distinctive Hebrew phrases searched as substrings in title and body, e.g. "עבירות נשק", "מדיניות ענישה", "צריכה עצמית"; results are merged, title matches first'),
   topic: optText.describe('Substring of the guideline topic field'),
   source: optText.describe('Substring of the issuing body, e.g. "פרקליט המדינה", "היועץ המשפטי לממשלה". Ignored when the user chose sources in the search setup'),
   sources: z.array(text).max(50).optional().describe('Exact source labels; normally set from the user\'s search setup'),
@@ -116,7 +122,7 @@ const fieldValuesSchema = z.object({
 
 const readDocumentSchema = z.object({
   kind: z.enum(['ruling', 'guideline']),
-  id: z.number().int(),
+  id: z.number().int().describe('The number after "ruling:" or "guideline:" in the ref'),
   max_chars: z.number().int().min(2000).max(80000).default(40000),
 });
 
@@ -209,7 +215,8 @@ export function sentencingForModel(result, params) {
       : null,
     items: result.items.map((item, index) => ({
       rank: index + 1,
-      id: item.id,
+      // Cite as [[ruling:ID]]; the app shows the verified case number. The bare id is not a case number.
+      ref: `ruling:${item.id}`,
       title: item.title,
       court: item.court,
       date: item.date,
@@ -311,7 +318,7 @@ export async function executeTool(toolUse, ctx) {
             totals: result.totals,
             sources_filter: result.sources,
             items: result.items.map((g) => ({
-              id: g.id, title: g.title, number: g.number, source: g.source, topic: g.topic, date: g.date,
+              ref: `guideline:${g.id}`, title: g.title, number: g.number, source: g.source, topic: g.topic, date: g.date,
               matched_queries: g.matchedQueries, summary: truncate(g.summary, 400),
             })),
           }),
