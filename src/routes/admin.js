@@ -5,6 +5,7 @@ import { query } from '../db.js';
 import { requireAdmin } from '../auth.js';
 import { getSettings, repriceUnpricedUsage, setSetting } from '../usage.js';
 import { encryptionAvailable } from '../secrets.js';
+import { adminAlerts, budgetStatus, dismissProviderAlert, saveBudget } from '../llm/alerts.js';
 import { describeSearch } from '../../public/search-describe.js';
 import { deleteKey, keyStatus, listModels, MODEL_ID_RE, modelSettings, PROVIDER_IDS, PROVIDERS, resolveKey, saveKey, saveModelSettings } from '../llm/index.js';
 
@@ -43,7 +44,7 @@ adminRouter.get('/overview', async (_req, res) => {
       (SELECT COALESCE(SUM(cost_usd), 0) FROM usage_events WHERE created_at >= date_trunc('month', now()))::float8 AS cost_month,
       (SELECT COUNT(*) FROM usage_events WHERE kind = 'tagit' AND created_at >= date_trunc('month', now()))::int AS tagit_calls_month
   `);
-  res.json({ overview: rows[0], settings: await getSettings() });
+  res.json({ overview: rows[0], settings: await getSettings(), alerts: await adminAlerts((await modelSettings()).provider) });
 });
 
 adminRouter.get('/users', async (_req, res) => {
@@ -137,9 +138,10 @@ adminRouter.put('/settings', async (req, res) => {
 // ---------- Language model: provider, model, keys and prices ----------
 
 async function modelsPayload() {
-  const [config, keys] = await Promise.all([modelSettings(), keyStatus()]);
+  const [config, keys, settings] = await Promise.all([modelSettings(), keyStatus(), getSettings()]);
   return {
     ...config,
+    budgets: await budgetStatus(settings),
     providers: PROVIDER_IDS.map((id) => ({ id, label: PROVIDERS[id].label, key: keys[id] })),
     encryptionAvailable: encryptionAvailable(),
   };
@@ -222,6 +224,34 @@ adminRouter.delete('/models/:provider/key', async (req, res) => {
   // Removing the active provider's only key would stop every conversation: say so.
   const stranded = active === provider && !(await resolveKey(provider));
   res.json({ ...payload, warning: stranded ? 'הספק הפעיל נשאר ללא מפתח, ולכן שיחות ייכשלו עד שיוגדר מפתח או ייבחר ספק אחר.' : null });
+});
+
+// The credit the admin loaded at a provider, so the panel can warn before it runs out.
+const budgetSchema = z.union([
+  z.object({
+    amountUsd: z.number().min(0).max(1_000_000),
+    since: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((d) => !Number.isNaN(Date.parse(d))),
+    warnBelowUsd: z.number().min(0).max(1_000_000),
+  }).strict(),
+  z.null(), // stops tracking
+]);
+
+adminRouter.put('/models/:provider/budget', async (req, res) => {
+  const provider = providerParam(req, res);
+  if (!provider) return;
+  // parse() answers null for invalid input, and null is a valid budget here, so check directly.
+  const result = budgetSchema.safeParse(req.body?.budget ?? null);
+  if (!result.success) return res.status(400).json({ error: 'invalid_input', issues: result.error.issues });
+  const data = result.data;
+  await saveBudget(provider, data);
+  console.log(`[admin] ${provider} credit tracking ${data ? 'set' : 'cleared'} by ${req.account.email}`);
+  res.json(await modelsPayload());
+});
+
+adminRouter.delete('/alert', async (req, res) => {
+  await dismissProviderAlert();
+  console.log(`[admin] model alert dismissed by ${req.account.email}`);
+  res.json({ alerts: await adminAlerts((await modelSettings()).provider) });
 });
 
 adminRouter.get('/models/:provider/available', async (req, res) => {

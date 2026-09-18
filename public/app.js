@@ -1,5 +1,6 @@
 import { marked } from '/vendor/marked.js';
 import DOMPurify from '/vendor/purify.js';
+import { describeAlert } from '/llm-alerts.js';
 
 const APP_TITLE = 'זומר · מחקר ענישה';
 const NEW_TAB = ' (נפתח בלשונית חדשה)';
@@ -164,9 +165,38 @@ async function boot() {
   }
   renderApp();
   renderQuota(me.quota);
+  renderAlerts(me.alerts);
   await loadConversations();
   const match = location.hash.match(/^#c=([0-9a-f-]{36})$/i);
   if (match) openConversation(match[1]);
+}
+
+// Admins only: the model is out of credit (or about to be), or the provider rejects the key or model.
+function renderAlerts(alerts) {
+  const box = ui.alertsBox;
+  if (!box) return;
+  box.replaceChildren(...(alerts ?? []).map((alert) => {
+    const text = describeAlert(alert);
+    return h('div', { class: text.level === 'error' ? 'error-box llm-alert' : 'notice-box llm-alert', role: text.level === 'error' ? 'alert' : 'status' },
+      h('strong', { text: text.title }),
+      h('p', { text: text.body }),
+      ...[
+        text.detail ? h('p', { class: 'small', text: text.detail }) : null,
+        h('p', { class: 'small' },
+          text.billingUrl ? h('a', { href: text.billingUrl, target: '_blank', rel: 'noopener noreferrer', text: 'למסך החיוב אצל הספק' }) : null,
+          text.billingUrl ? ' · ' : null,
+          h('a', { href: '/admin', text: 'לניהול המערכת' })),
+      ].filter(Boolean));
+  }));
+  box.hidden = !box.childElementCount;
+}
+
+async function refreshAlerts() {
+  if (state.me?.user.role !== 'admin') return;
+  try {
+    const me = await (await fetch('/api/me')).json();
+    renderAlerts(me.alerts);
+  } catch { /* the next turn tries again */ }
 }
 
 function renderGate(title, body, action, extra = null) {
@@ -282,8 +312,10 @@ function renderApp() {
         h('span', { class: 'foot-short', text: 'לסיוע במחקר בלבד; יש לבדוק מול המקור. ' }),
         h('a', { href: '/accessibility', text: 'הצהרת נגישות' }), ' · ', h('a', { href: '/privacy', text: 'מדיניות פרטיות' }))));
 
+  const alertsBox = h('div', { class: 'llm-alerts', hidden: true });
   const main = h('main', { class: 'main', id: 'content', tabindex: '-1' },
     h('h1', { class: 'sr-only', text: 'מחקר ענישה: איתור גזרי דין והנחיות' }),
+    alertsBox,
     thread,
     composer);
   root.replaceChildren(h('div', { class: 'app-shell' }, sidebar, main));
@@ -322,7 +354,7 @@ function renderApp() {
   syncSidebar();
 
   ui = {
-    sidebar, newButton, conversationList, quota, thread, threadInner, textarea, sendBtn, attachBtn, attachment, fileInput, composerError,
+    sidebar, alertsBox, newButton, conversationList, quota, thread, threadInner, textarea, sendBtn, attachBtn, attachment, fileInput, composerError,
     closeSidebar: () => setSidebar(false),
   };
   showWelcome();
@@ -672,6 +704,7 @@ async function send({ answers = null, text: presetText = null } = {}) {
   state.controller = null;
   setBusy(false);
   loadConversations();
+  refreshAlerts();
 
   if (outcome === 'done') {
     announce(assistant.askedQuestions ? 'התשובה הושלמה, והמערכת שואלת שאלות המשך בסופה.' : 'התשובה הושלמה.');

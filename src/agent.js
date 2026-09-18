@@ -2,6 +2,7 @@
 import { query } from './db.js';
 import { activeModel, streamModel } from './llm/index.js';
 import { getQuota, recordModelUsage } from './usage.js';
+import { clearProviderAlert, recordConfigFailure, recordProviderFailure } from './llm/alerts.js';
 import { loadSearchSetup } from './search-options.js';
 import { TOOLS, askUserSchema, executeTool, validationError } from './tools.js';
 
@@ -81,7 +82,13 @@ function pendingToolResults(history, answers) {
 export async function runTurn({ account, conversationId, turnId, userBlocks, userUi, answers, emit, signal }) {
   // Resolved once per turn and before anything is saved: a missing key fails the request cleanly, and an admin
   // switching models mid-turn does not split one answer across two models.
-  const llm = await activeModel();
+  let llm;
+  try {
+    llm = await activeModel();
+  } catch (err) {
+    await recordConfigFailure(err).catch(() => {});
+    throw err;
+  }
   const history = await loadHistory(conversationId);
   // Saved by the chat route from this turn's answers (if any) before the turn starts.
   const searchSetup = await loadSearchSetup(conversationId);
@@ -107,13 +114,22 @@ export async function runTurn({ account, conversationId, turnId, userBlocks, use
     }
     emit({ type: 'status', text: iteration === 0 ? 'חושב…' : 'ממשיך בעיבוד…' });
 
-    const message = await streamModel(llm, {
-      system: SYSTEM_PROMPT,
-      tools: TOOLS,
-      messages,
-      signal,
-      onText: (delta) => emit({ type: 'text', delta }),
-    });
+    let message;
+    try {
+      message = await streamModel(llm, {
+        system: SYSTEM_PROMPT,
+        tools: TOOLS,
+        messages,
+        signal,
+        onText: (delta) => emit({ type: 'text', delta }),
+      });
+    } catch (err) {
+      // Out of credit, a revoked key or a withdrawn model: flag it for the admin, and let the chat route
+      // tell the user what happened instead of guessing from the status code.
+      if (!signal?.aborted) err.llmKind = await recordProviderFailure({ provider: llm.provider, model: llm.model, err }).catch(() => undefined);
+      throw err;
+    }
+    await clearProviderAlert(llm.provider);
 
     const toolUses = message.content.filter((block) => block.type === 'tool_use');
     await recordModelUsage({

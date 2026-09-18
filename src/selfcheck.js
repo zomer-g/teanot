@@ -3,6 +3,7 @@
 import * as tagit from './tagit.js';
 import { probePdfExtraction } from './extract.js';
 import { activeModel, keyStatus, streamModel } from './llm/index.js';
+import { clearProviderAlert, recordProviderFailure } from './llm/alerts.js';
 import { encryptionAvailable } from './secrets.js';
 
 const EXPECTED_FIELDS = [
@@ -37,9 +38,10 @@ export async function runSelfCheck() {
 
   report.encryptionAvailable = encryptionAvailable();
   report.llm = await timed(async () => {
+    let llm = null;
     try {
       const keys = await keyStatus();
-      const llm = await activeModel();
+      llm = await activeModel();
       let text = '';
       const answer = await streamModel(llm, {
         system: 'Reply with the single word OK.',
@@ -47,6 +49,7 @@ export async function runSelfCheck() {
         messages: [{ role: 'user', content: [{ type: 'text', text: 'Reply with the single word OK.' }] }],
         onText: (delta) => { text += delta; },
       });
+      await clearProviderAlert(llm.provider);
       return {
         ok: true,
         provider: llm.provider,
@@ -57,6 +60,8 @@ export async function runSelfCheck() {
         keySources: Object.fromEntries(Object.entries(keys).map(([id, k]) => [id, k.source])),
       };
     } catch (err) {
+      // A boot after the credit ran out raises the admin alert even before anyone asks a question.
+      if (llm) await recordProviderFailure({ provider: llm.provider, model: llm.model, err }).catch(() => {});
       return errorInfo(err);
     }
   });

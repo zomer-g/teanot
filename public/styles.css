@@ -171,6 +171,11 @@ body.app-page #root { flex: 1; min-height: 0; display: flex; flex-direction: col
 
 .main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #fff; }
 .main:focus { outline: none; }
+.llm-alerts { flex: none; width: 100%; max-width: 1280px; margin: 0 auto; padding: 12px 20px 0; }
+.llm-alerts[hidden] { display: none; }
+.llm-alert p { margin: 4px 0 0; }
+.llm-alert a { color: inherit; font-weight: 600; }
+.admin-wrap .llm-alerts { padding: 0; margin-bottom: 16px; }
 .thread { flex: 1; min-height: 0; overflow-y: auto; scroll-behavior: smooth; }
 .thread:focus { outline: none; }
 .thread:focus-visible { outline: 3px solid var(--primary-dark); outline-offset: -3px; box-shadow: none; }

@@ -1,6 +1,7 @@
 import { marked } from '/vendor/marked.js';
 import DOMPurify from '/vendor/purify.js';
 import { describeSearch } from '/search-describe.js';
+import { describeAlert } from '/llm-alerts.js';
 
 // Same Markdown-only allowlist as the chat: transcripts show other users' (model-written) content.
 const PURIFY_CONFIG = {
@@ -102,8 +103,30 @@ function pager(offset, limit, count, total, onPage) {
 
 // ---------- Overview ----------
 
+function renderAlerts(alerts) {
+  const box = document.getElementById('alerts');
+  box.replaceChildren(...alerts.map((alert) => {
+    const text = describeAlert(alert);
+    return h('div', { class: text.level === 'error' ? 'error-box llm-alert' : 'notice-box llm-alert', role: text.level === 'error' ? 'alert' : 'status' },
+      h('strong', { text: text.title }),
+      h('p', { text: text.body }),
+      text.detail ? h('p', { class: 'small', dir: 'auto', text: text.detail }) : null,
+      h('div', { class: 'toolbar', style: 'margin:6px 0 0' },
+        text.billingUrl ? h('a', { class: 'btn btn-secondary btn-sm', href: text.billingUrl, target: '_blank', rel: 'noopener noreferrer' }, 'למסך החיוב אצל הספק') : null,
+        h('button', { class: 'btn btn-ghost btn-sm', type: 'button', onClick: () => activateTab(document.getElementById('tabbtn-models'), { focus: true }) }, 'ללשונית מודל שפה'),
+        alert.type === 'provider_failure'
+          ? h('button', { class: 'btn btn-ghost btn-sm', type: 'button', onClick: async () => {
+            const result = await runAction(() => api('/alert', { method: 'DELETE' }), { success: 'ההתראה הוסתרה. אם הבעיה נמשכת, היא תופיע שוב בקריאה הבאה.' });
+            if (result) renderAlerts(result.alerts);
+          } }, 'הסתרת ההתראה')
+          : null));
+  }));
+  box.hidden = !alerts.length;
+}
+
 async function loadOverview() {
-  const { overview } = await api('/overview');
+  const { overview, alerts } = await api('/overview');
+  renderAlerts(alerts ?? []);
   const stat = (label, value) => h('div', { class: 'card stat' }, h('dt', { text: label }), h('dd', { text: value }));
   document.getElementById('stats').replaceChildren(
     stat('משתמשים פעילים', fmtInt(overview.active_users)),
@@ -316,6 +339,10 @@ function renderQueries(data) {
         h('span', { class: 'badge badge-muted', text: REQUEST_KINDS[t.request_kind] || t.request_kind }),
         h('div', { class: 'small clamp-2', title: summary, text: summary })),
       h('td', { style: 'min-width:180px;max-width:300px' }, searches.length ? searches : h('span', { class: 'small muted', text: '—' })),
+      // "Show more" pages only ask TAG-IT for the next page; a 0 there would read like a failed model call.
+      ...(t.request_kind === 'more' && !t.model_calls ? [
+        h('td', { class: 'num small muted', colspan: '3', text: 'לא נדרש מודל (דפדוף בתוצאות מ-TAG-IT)' }),
+      ] : [
       h('td', { class: 'num', text: fmtInt(t.model_calls) }),
       h('td', { class: 'num' },
         h('div', { text: fmtInt(t.total_tokens) }),
@@ -324,6 +351,7 @@ function renderQueries(data) {
       h('td', { class: 'num', style: 'font-weight:600' },
         h('div', { text: fmtUsd(t.cost_usd) }),
         t.unpriced_calls ? h('div', { class: 'cell-note', text: `חלקית: ${fmtInt(t.unpriced_calls)} קריאות ללא מחיר` }) : null),
+      ]),
       h('td', { class: 'num small', text: fmtDuration(t.duration_seconds) }),
       h('td', {},
         h('span', { class: `badge ${statusClass}`, text: statusLabel }),
@@ -666,7 +694,46 @@ function providerCard(p) {
     h('p', { class: 'small', id: statusId, text: keyStatusText(p.key) }),
     keyForm,
     h('hr', { class: 'divider' }),
-    modelForm);
+    modelForm,
+    h('hr', { class: 'divider' }),
+    budgetForm(p, titleId));
+}
+
+// The credit loaded at the provider. No provider tells an API key its balance, so the remainder is
+// estimated from the priced usage log, and the admin is warned in the chat and here when it runs low.
+function budgetForm(p, titleId) {
+  const budget = state.models.budgets?.[p.id] ?? null;
+  const statusId = `provider-budget-status-${p.id}`;
+  const field = (name, label, value, props = {}) => h('label', {}, h('span', { class: 'label', text: label }),
+    h('input', { class: 'input', name, dir: 'ltr', value: value ?? '', 'aria-describedby': statusId, ...props }));
+  const today = new Date().toISOString().slice(0, 10);
+  const money = { type: 'number', min: 0, step: 'any', inputmode: 'decimal', required: true };
+  const status = budget
+    ? `נטענו ${fmtUsd(budget.amountUsd)} ב-${new Date(`${budget.since}T00:00:00`).toLocaleDateString('he-IL')}; נוצלו לפי ההערכה ${fmtUsd(budget.spentUsd)}, ונשארו כ-${fmtUsd(Math.max(0, budget.remainingUsd))}.`
+      + (budget.unpricedCalls ? ` ${fmtInt(budget.unpricedCalls)} קריאות ללא מחיר אינן נכללות.` : '')
+      + (budget.low ? ' היתרה מתחת לסף ההתראה.' : '')
+    : 'לא מוגדר מעקב. הזינו כמה קרדיט טענתם אצל הספק, ותתקבל התראה לפני שהוא נגמר.';
+  const form = h('form', { onSubmit: async (e) => {
+    e.preventDefault();
+    const data = new FormData(form);
+    const body = { budget: { amountUsd: Number(data.get('amountUsd')), since: String(data.get('since')), warnBelowUsd: Number(data.get('warnBelowUsd')) } };
+    const payload = await runAction(() => api(`/models/${p.id}/budget`, { method: 'PUT', body }), { success: 'מעקב הקרדיט נשמר.' });
+    if (payload) { state.models = payload; renderModels({ focus: titleId }); loadOverview(); }
+  } },
+  h('h3', { class: 'label', style: 'margin:0 0 4px', text: 'מעקב אחר יתרת הקרדיט' }),
+  h('p', { class: `small${budget?.low ? '' : ' muted'}`, id: statusId, style: 'margin-top:0', text: status }),
+  h('div', { class: 'price-grid' },
+    field('amountUsd', 'סכום שנטען (דולרים)', budget?.amountUsd, money),
+    field('since', 'תאריך הטעינה', budget?.since ?? today, { type: 'date', max: today, required: true }),
+    field('warnBelowUsd', 'התראה כשנשארים פחות מ- (דולרים)', budget?.warnBelowUsd ?? 5, money)),
+  h('p', { class: 'small muted', style: 'margin:4px 0 0', text: 'כשטוענים קרדיט נוסף, מזינים את היתרה המעודכנת אצל הספק ואת תאריך היום. ההערכה נשענת על המחירים שבטבלה, ולכן כדאי להשוות מדי פעם למסך החיוב של הספק.' }),
+  h('div', { class: 'toolbar', style: 'margin:8px 0 0' },
+    h('button', { class: 'btn btn-secondary btn-sm', type: 'submit' }, 'שמירת מעקב הקרדיט'),
+    budget ? h('button', { class: 'btn btn-ghost btn-sm', type: 'button', onClick: async () => {
+      const payload = await runAction(() => api(`/models/${p.id}/budget`, { method: 'PUT', body: { budget: null } }), { success: 'המעקב הופסק.' });
+      if (payload) { state.models = payload; renderModels({ focus: titleId }); loadOverview(); }
+    } }, 'הפסקת המעקב') : null));
+  return form;
 }
 
 function renderModels({ focus } = {}) {

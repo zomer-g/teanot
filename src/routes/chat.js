@@ -7,7 +7,8 @@ import { z } from 'zod';
 import { query } from '../db.js';
 import { loginUrl, logoutUrl, requireActive } from '../auth.js';
 import { documentBlock, documentFromText, extractDocument, MAX_UPLOAD_BYTES, UserFacingError } from '../extract.js';
-import { ModelConfigError } from '../llm/index.js';
+import { modelSettings } from '../llm/index.js';
+import { adminAlerts } from '../llm/alerts.js';
 import { QuotaExceededError, assertQuota, getQuota, recordTagitCall } from '../usage.js';
 import { finishTurn, lastTurn, startTurn } from '../turns.js';
 import { rateLimit } from '../security.js';
@@ -84,6 +85,8 @@ chatRouter.get('/me', async (req, res) => {
     authenticated: true,
     user: { email, name, role, status },
     quota: status === 'active' ? await getQuota(req.account) : null,
+    // Admins see why the model stopped (or is about to) right in the chat, not only in the admin panel.
+    alerts: role === 'admin' && status === 'active' ? await adminAlerts((await modelSettings()).provider) : undefined,
     logoutUrl,
   });
 });
@@ -129,16 +132,9 @@ chatRouter.post('/conversations/:id/stop', requireActive, async (req, res) => {
 });
 
 // User-facing messages stay generic; details go to the server log. Every provider SDK reports an HTTP status.
-function errorMessage(err) {
-  if (err instanceof ModelConfigError) return 'לא הוגדר מודל שפה פעיל או מפתח API עבורו. יש לפנות למנהל המערכת.';
-  const status = Number(err?.status);
-  if (status === 429) return 'שירות מודל השפה עמוס כרגע. נסו שוב בעוד דקה.';
-  if (status === 401 || status === 403) return 'מפתח ה-API של שירות מודל השפה אינו תקין. יש לפנות למנהל המערכת.';
-  if (status === 404) return 'המודל שנבחר אינו זמין אצל הספק. יש לפנות למנהל המערכת.';
-  if (status === 400 || status === 413) return 'שירות מודל השפה דחה את הבקשה. אם צורף מסמך גדול במיוחד, נסו לצרף רק את החלק הרלוונטי.';
-  if (status >= 500) return 'שירות מודל השפה החזיר שגיאה. נסו שוב.';
-  return 'אירעה שגיאה בעיבוד הבקשה. נסו שוב.';
-}
+// Users get one generic message. The cause (out of credit, bad key, missing model, provider error) goes to
+// the admin: the chat and admin-panel alert (src/llm/alerts.js) and the turn's error in the queries log.
+const GENERIC_ERROR = 'אירעה תקלה בעיבוד הבקשה. אפשר לנסות שוב מאוחר יותר, ואם התקלה חוזרת, מוזמנים לפנות למנהל המערכת: guy@z-g.co.il.';
 
 chatRouter.post('/chat', requireActive, rateLimit({ name: 'chat', limit: 30, windowMs: TEN_MINUTES }), reserveTurnSlot, upload.single('file'), async (req, res) => {
   const account = req.account;
@@ -240,7 +236,7 @@ chatRouter.post('/chat', requireActive, rateLimit({ name: 'chat', limit: 30, win
     } else {
       console.error(`[turn] id=${turnId} failed`, err);
       errorText = err.message;
-      emit({ type: 'error', message: errorMessage(err) });
+      emit({ type: 'error', message: GENERIC_ERROR });
     }
   } finally {
     await finishTurn(turnId, status, errorText).catch((err) => console.error('[turn] finish failed', err));
