@@ -43,12 +43,13 @@ class JevError extends Error {
 }
 
 async function runJev(state, questions, { signal } = {}) {
-  const url = `${API_BASE}/accounts/${encodeURIComponent(process.env.CLOUDFLARE_ACCOUNT_ID)}/ai/run/${MODEL}`;
+  // Third-party models run through /ai/run with the model named in the body (not in the path).
+  const url = `${API_BASE}/accounts/${encodeURIComponent(process.env.CLOUDFLARE_ACCOUNT_ID)}/ai/run`;
   const timeout = AbortSignal.timeout(TIMEOUT_MS);
   const res = await fetch(url, {
     method: 'POST',
     headers: { Authorization: `Bearer ${process.env.CLOUDFLARE_AI_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ state, questions }),
+    body: JSON.stringify({ model: MODEL, input: { state, questions } }),
     signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
   const body = await res.json().catch(() => null);
