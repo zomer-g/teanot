@@ -13,7 +13,8 @@ import { QuotaExceededError, assertQuota, getQuota, recordTagitCall } from '../u
 import { finishTurn, lastTurn, startTurn } from '../turns.js';
 import { rateLimit } from '../security.js';
 import { runTurn } from '../agent.js';
-import { sentencingParamsSchema, withSentencingSetup } from '../tools.js';
+import { relevanceUi, sentencingParamsSchema, withSentencingSetup } from '../tools.js';
+import { applyRelevance } from '../relevance.js';
 import { getArrangementPunishments, getGuidelineSources, getSentencingFlags, loadSearchSetup, normalizeSetup, saveSearchSetup, searchSetupSchema } from '../search-options.js';
 import * as tagit from '../tagit.js';
 
@@ -339,8 +340,9 @@ chatRouter.post('/tagit/sentencing/more', requireActive, tagitLimit, async (req,
     // The same user setup the first page was searched with, even if the browser sent older parameters.
     const result = await tagit.searchSentencing(await withSentencingSetup(parsed.data, await loadSearchSetup(conversation.id), corpus), { page, scope: tagit.corpusScope(corpus) });
     await recordTagitCall({ account: req.account, conversationId: conversation.id, turnId, detail: { action, label: parsed.data.label, page, total: result.total, returned: result.items.length } });
+    const relevance = await applyRelevance(result, { account: req.account, conversationId: conversation.id, turnId, corpus, label: parsed.data.label });
     await finishTurn(turnId, 'completed');
-    res.json({ page: result.page, total: result.total, items: result.items });
+    res.json({ page: result.page, total: result.total, items: relevance.items, ...relevanceUi(relevance, req.account) });
   } catch (err) {
     console.error('[tagit] more failed', err);
     await recordTagitCall({ account: req.account, conversationId: conversation.id, turnId, detail: { action, label: parsed.data.label, page, error: err.message } });

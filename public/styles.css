@@ -602,6 +602,12 @@ body.app-page #root { flex: 1; min-height: 0; display: flex; flex-direction: col
 .export-choice legend { font-weight: 600; padding: 0; margin-bottom: 4px; }
 .export-status { margin: 0; color: var(--muted); }
 .item-export { display: inline-flex; gap: 6px; align-items: center; }
+.badge-relevance { border-style: dashed; }
+.badge-relevance.relevance-high { background: #e3f3ea; color: var(--success); border-color: var(--success); }
+.badge-relevance.relevance-mid { background: #fdf5dd; color: var(--accent-text); border-color: var(--accent-text); }
+.badge-relevance.relevance-low { background: var(--warning-bg); color: var(--warning-text); border-color: var(--warning-border); }
+.hidden-results { margin-top: 12px; border: 1px dashed var(--border-control); border-radius: var(--radius-lg); padding: 8px 12px; }
+.hidden-results > summary { cursor: pointer; font-weight: 600; color: var(--primary-dark); }
 .item-export .btn-sm { min-height: 28px; padding: 2px 10px; font-size: 12.5px; }
 @media (max-width: 640px) {
   .export-bar { margin: 8px 8px 0; }

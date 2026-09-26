@@ -7,6 +7,7 @@ import { getSettings, repriceUnpricedUsage, setSetting } from '../usage.js';
 import { encryptionAvailable } from '../secrets.js';
 import { adminAlerts, budgetStatus, dismissProviderAlert, saveBudget } from '../llm/alerts.js';
 import { describeSearch } from '../../public/search-describe.js';
+import { isConfigured, LEVELS, MODES, relevanceSettings, saveRelevanceSettings, testConnection } from '../relevance.js';
 import { deleteKey, keyStatus, listModels, MODEL_ID_RE, modelSettings, PROVIDER_IDS, PROVIDERS, resolveKey, saveKey, saveModelSettings } from '../llm/index.js';
 
 export const adminRouter = Router();
@@ -144,8 +145,35 @@ async function modelsPayload() {
     budgets: await budgetStatus(settings),
     providers: PROVIDER_IDS.map((id) => ({ id, label: PROVIDERS[id].label, key: keys[id] })),
     encryptionAvailable: encryptionAvailable(),
+    relevance: await relevancePayload(),
   };
 }
+
+// ---------- Relevance scoring of search results (Jev on Cloudflare Workers AI) ----------
+
+async function relevancePayload() {
+  const { rows: [stats] } = await query(
+    `SELECT COUNT(*)::int AS calls, COALESCE(SUM(input_tokens), 0)::int AS tokens, COALESCE(SUM(cost_usd), 0)::float8 AS cost
+     FROM usage_events WHERE kind = 'relevance' AND created_at >= date_trunc('month', now())`,
+  );
+  return { configured: isConfigured(), settings: await relevanceSettings(), levels: LEVELS, month: stats };
+}
+
+const relevanceSchema = z.object({
+  mode: z.enum(MODES),
+  threshold: z.number().min(0).max(LEVELS.length - 1),
+}).strict();
+
+adminRouter.put('/relevance', async (req, res) => {
+  const data = parse(relevanceSchema, req.body, res);
+  if (!data) return;
+  await saveRelevanceSettings(data);
+  res.json(await relevancePayload());
+});
+
+adminRouter.post('/relevance/test', async (_req, res) => {
+  res.json(await testConnection());
+});
 
 adminRouter.get('/models', async (_req, res) => {
   res.json(await modelsPayload());

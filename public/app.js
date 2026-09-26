@@ -1060,7 +1060,7 @@ function renderRuling(r, rank, corpus = SENTENCING) {
       h('div', {},
         h('h4', { class: 'result-title', id: titleId }, externalLink(r.fileUrl, r.title)),
         h('p', { class: 'result-meta', text: [r.court, fmtDate(r.date), r.caseNumber && !r.title.includes(r.caseNumber) ? r.caseNumber : null].filter(Boolean).join(' · ') }),
-        h('div', { class: 'result-sentence' }, sentenceBadges(r)),
+        h('div', { class: 'result-sentence' }, sentenceBadges(r), relevanceBadge(r)),
         r.snippet ? h('p', { class: 'result-summary small muted', text: r.snippet }) : null,
         clampedText(r.summary, r.title),
         h('div', { class: 'result-actions' },
@@ -1069,6 +1069,15 @@ function renderRuling(r, rank, corpus = SENTENCING) {
           detailsBtn,
           itemExportButtons(corpus.kind, r)),
         details)));
+}
+
+// The relevance score (0–3) of a result, for admins only: they calibrate the threshold from it.
+const isAdmin = () => state.me?.user?.role === 'admin';
+function relevanceBadge(r) {
+  if (!isAdmin() || !r.relevance) return null;
+  const { score } = r.relevance;
+  const level = score >= 2.5 ? 'high' : score >= 1.5 ? 'mid' : 'low';
+  return h('span', { class: `badge badge-relevance relevance-${level}`, title: 'ציון רלוונטיות לתיק (0–3), מוצג למנהלים בלבד', text: `רלוונטיות ${score.toFixed(1)}` });
 }
 
 // What tells the two document corpora apart on screen.
@@ -1084,6 +1093,20 @@ function renderResults(data, block, corpus = SENTENCING) {
   const headingId = nextId('results');
   const list = h('ol', { class: 'result-list' });
   const more = h('div', { class: 'results-more' });
+  // Results the relevance filter hid: a count for everyone, and for admins the results themselves.
+  let hiddenCount = data.relevance?.hidden ?? 0;
+  const hiddenNote = h('p', { class: 'notice-box small', hidden: !hiddenCount });
+  const hiddenList = h('ol', { class: 'result-list' });
+  const hiddenBox = h('details', { class: 'hidden-results', hidden: true },
+    h('summary', { text: 'התוצאות שהוסתרו (מוצג למנהלים בלבד)' }), hiddenList);
+  const addHidden = (count, hiddenItems) => {
+    hiddenCount += count;
+    hiddenNote.hidden = !hiddenCount;
+    hiddenNote.textContent = `הוסתרו ${hiddenCount} תוצאות שציון הרלוונטיות שלהן לתיק נמוך מ-${data.relevance?.threshold ?? ''}.`;
+    for (const r of hiddenItems ?? []) hiddenList.append(renderRuling(r, '–', corpus));
+    hiddenBox.hidden = !hiddenList.childElementCount;
+  };
+  addHidden(0, data.hiddenItems);
 
   const renderMore = (focusFirstNew = false) => {
     const next = items.slice(shown, shown + PAGE);
@@ -1115,7 +1138,8 @@ function renderResults(data, block, corpus = SENTENCING) {
           if (!res.ok) throw new Error();
           const nextPage = await res.json();
           page = nextPage.page;
-          if (!nextPage.items.length) { data.total = items.length; }
+          if (!nextPage.items.length && !nextPage.relevance?.hidden) { data.total = items.length; }
+          if (nextPage.relevance) addHidden(nextPage.relevance.hidden, nextPage.hiddenItems);
           corpus.register(nextPage.items);
           items.push(...nextPage.items);
           renderMore(true);
@@ -1135,8 +1159,10 @@ function renderResults(data, block, corpus = SENTENCING) {
       h('h3', { id: headingId, text: `${corpus.heading} · ${data.label}` }),
       h('p', { class: 'results-query', text: `${count} · ${data.params?.sort === 'date' ? 'מהחדש לישן' : `ממוינים ${corpus.order} ${data.params?.sort_direction === 'desc' ? 'החמור לקל' : 'הקל לחמור'}`}` })),
     data.textQueryDropped ? h('p', { class: 'notice-box small', text: 'מאגר TAG-IT לא איפשר לשלב את חיפוש הטקסט עם המסננים, ולכן החיפוש רץ לפי המסננים בלבד. ייתכן שחלק מהתוצאות אינן קשורות לעבירה.' }) : null,
+    hiddenNote,
     items.length ? list : h('div', { class: 'notice-box', text: corpus.empty }),
-    more);
+    more,
+    hiddenBox);
 }
 
 function renderGuidelines(data) {

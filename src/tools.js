@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { query } from './db.js';
 import { recordTagitCall } from './usage.js';
 import * as tagit from './tagit.js';
+import { applyRelevance } from './relevance.js';
 import { COURT_KEY, OFFENCE_KEYS, REPLACED_PARAMS, clauseFields } from './case-filters.js';
 
 const DRUG_SLUG_VALUES = Object.values(tagit.DRUG_SLUGS);
@@ -259,6 +260,7 @@ export function sentencingForModel(result, params, corpus = 'sentencing') {
       agreed_sentence: item.agreedSentence,
       defendants: item.defendants.length || undefined,
       summary: truncate(item.summary, 320),
+      relevance: item.relevance?.score ?? undefined,
     })),
   };
 }
@@ -274,6 +276,16 @@ const forModel = (setup, corpus) => {
   if (!chosen && !filters) return null;
   return { ...(chosen ?? {}), ...(filters ? { case_filters: filters } : {}) };
 };
+
+// What the result card shows about relevance: the mode and threshold, how many were hidden, and for admins the
+// hidden results themselves (to calibrate the threshold).
+export function relevanceUi(relevance, account) {
+  if (relevance.mode === 'off') return {};
+  return {
+    relevance: { mode: relevance.mode, threshold: relevance.threshold, hidden: relevance.hidden.length },
+    ...(account.role === 'admin' && relevance.hidden.length ? { hiddenItems: relevance.hidden } : {}),
+  };
+}
 
 // Whether the model set a parameter at all (an empty list or null is "not set").
 const isSet = (value) => (Array.isArray(value) ? value.length > 0 : value != null);
@@ -403,13 +415,26 @@ export async function executeTool(toolUse, ctx) {
       const uiType = arrangements ? 'arrangements' : 'results';
       activity(label, 'running');
       try {
-        const result = await tagit.searchSentencing(params, { signal, scope: tagit.corpusScope(corpus) });
-        await recordTagitCall({ account, conversationId, turnId, detail: { action, label: params.label, filter: result.filter, sort: params.sort, sort_direction: params.sort_direction, text_query: params.text_query || undefined, total: result.total, returned: result.items.length } });
-        const data = { label: params.label, params, total: result.total, page: result.page, size: result.size, items: result.items, corpus, textQueryDropped: result.textQueryDropped || undefined };
+        const found = await tagit.searchSentencing(params, { signal, scope: tagit.corpusScope(corpus) });
+        await recordTagitCall({ account, conversationId, turnId, detail: { action, label: params.label, filter: found.filter, sort: params.sort, sort_direction: params.sort_direction, text_query: params.text_query || undefined, total: found.total, returned: found.items.length } });
+        // Each result scored for relevance to the case (when the admin turned it on); under the threshold, hidden.
+        const relevance = await applyRelevance(found, { account, conversationId, turnId, corpus, label: params.label, signal });
+        const result = { ...found, items: relevance.items };
+        const data = {
+          label: params.label, params, total: result.total, page: result.page, size: result.size, items: result.items, corpus,
+          textQueryDropped: result.textQueryDropped || undefined,
+          ...relevanceUi(relevance, account),
+        };
         activity(label, 'done', { summary: result.total != null ? `${result.total} תוצאות` : `${result.items.length} תוצאות` });
         emit({ type: uiType, toolUseId: toolUse.id, data });
         return {
-          block: toolResult(toolUse, { ...sentencingForModel(result, params, corpus), applied_user_setup: forModel(ctx.searchSetup, corpus) }),
+          block: toolResult(toolUse, {
+            ...sentencingForModel(result, params, corpus),
+            hidden_low_relevance: relevance.hidden.length
+              ? `${relevance.hidden.length} results on this page scored below the relevance threshold and were hidden from the user; they are not in items.`
+              : undefined,
+            applied_user_setup: forModel(ctx.searchSetup, corpus),
+          }),
           ui: { type: uiType, data },
         };
       } catch (err) {

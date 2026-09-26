@@ -2,6 +2,7 @@
 // reachable with the configured keys, and does TAG-IT's live schema carry the fields the tools filter on?
 import * as tagit from './tagit.js';
 import { getArrangementPunishments } from './search-options.js';
+import { isConfigured as relevanceConfigured, relevanceSettings, testConnection as testRelevance } from './relevance.js';
 import { probePdfExtraction } from './extract.js';
 import { activeModel, keyStatus, streamModel } from './llm/index.js';
 import { clearProviderAlert, recordProviderFailure } from './llm/alerts.js';
@@ -167,6 +168,13 @@ export async function runSelfCheck() {
     } catch (err) {
       return errorInfo(err);
     }
+  });
+
+  // Relevance scoring (Jev on Cloudflare): one call on a fixed sample, only when it is configured.
+  report.relevance = await timed(async () => {
+    const settings = await relevanceSettings().catch(() => null);
+    if (!relevanceConfigured()) return { configured: false, mode: settings?.mode ?? null };
+    return { configured: true, mode: settings?.mode ?? null, threshold: settings?.threshold ?? null, ...await testRelevance() };
   });
 
   report.tagitGuidelineFacets = await timed(async () => {

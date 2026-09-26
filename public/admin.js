@@ -414,7 +414,7 @@ function renderUsage(data) {
   const { filters, offset, limit } = state.usage;
   const userSel = h('select', { class: 'select' }, h('option', { value: '' }, 'כל המשתמשים'),
     state.users.map((u) => h('option', { value: u.id, selected: String(u.id) === String(filters.user_id ?? '') }, u.email)));
-  const kindSel = select({ '': 'הכול', llm: 'מודל שפה', tagit: 'TAG-IT' }, filters.kind ?? '');
+  const kindSel = select({ '': 'הכול', llm: 'מודל שפה', tagit: 'TAG-IT', relevance: 'דירוג רלוונטיות' }, filters.kind ?? '');
   const from = h('input', { class: 'input', type: 'date', value: filters.from ?? '' });
   const to = h('input', { class: 'input', type: 'date', value: filters.to ?? '' });
   const apply = () => {
@@ -593,6 +593,56 @@ async function runAction(action, { success }) {
   }
 }
 
+// Relevance of search results to the case, scored by Jev on Cloudflare Workers AI.
+const RELEVANCE_MODES = {
+  off: 'כבוי',
+  admin: 'ציונים למנהלים בלבד (לכיול): הציון מוצג על כל כרטיס למנהלים, ושום תוצאה לא מוסתרת',
+  filter: 'סינון: תוצאות מתחת לסף מוסתרות מהמשתמשים, מסיכום המודל ומהייצוא',
+};
+
+function relevanceCard() {
+  const r = state.models.relevance;
+  if (!r) return null;
+  const titleId = 'relevance-title';
+  const modeRadios = Object.entries(RELEVANCE_MODES).map(([value, label]) => {
+    const id = `relevance-mode-${value}`;
+    return h('div', { class: 'radio-row' },
+      h('input', { type: 'radio', name: 'relevance-mode', id, value, checked: r.settings.mode === value }),
+      h('label', { for: id, text: label }));
+  });
+  const thresholdId = 'relevance-threshold';
+  const thresholds = {};
+  for (let v = 0.5; v <= r.levels.length - 1; v += 0.5) thresholds[String(v)] = `${v} ומעלה`;
+  const threshold = select(thresholds, String(r.settings.threshold), { id: thresholdId });
+  const testResult = h('p', { class: 'small', role: 'status' });
+  const form = h('form', { class: 'card card-body', 'aria-labelledby': titleId, onSubmit: async (e) => {
+    e.preventDefault();
+    const mode = form.querySelector('input[name="relevance-mode"]:checked')?.value ?? 'off';
+    const payload = await runAction(() => api('/relevance', { method: 'PUT', body: { mode, threshold: Number(threshold.value) } }), { success: 'הגדרות הרלוונטיות נשמרו.' });
+    if (payload) { state.models.relevance = payload; renderModels({ focus: titleId }); }
+  } },
+  h('h2', { class: 'card-title', id: titleId, tabindex: '-1', text: 'רלוונטיות התוצאות (Jev)' }),
+  h('p', { class: 'small muted', text: 'כל גזר דין והסדר מותנה שמתקבל מקבל ציון רלוונטיות לתיק שבשיחה, לפי ניתוח המסמך. הדירוג: '
+    + r.levels.map((label, i) => `${i} – ${label}`).join(' · ') + '. בשיחה בלי מסמך לא מחושב ציון.' }),
+  r.configured ? null : h('div', { class: 'notice-box', text: 'חסרים משתני הסביבה CLOUDFLARE_ACCOUNT_ID ו-CLOUDFLARE_AI_TOKEN. יש להגדיר אותם בשרת ולפרוס מחדש.' }),
+  h('fieldset', { class: 'radio-group' }, h('legend', { class: 'label', text: 'מצב' }), modeRadios),
+  h('div', { class: 'field' }, h('label', { class: 'label', for: thresholdId, text: 'סף רלוונטיות להצגה (במצב סינון)' }), threshold),
+  h('p', { class: 'small muted', text: `החודש: ${fmtInt(r.month.calls)} חיפושים דורגו · ${fmtInt(r.month.tokens)} טוקנים · ${fmtUsd(r.month.cost)}` }),
+  h('div', { class: 'row-actions' },
+    h('button', { class: 'btn btn-accent', type: 'submit' }, 'שמירה'),
+    h('button', { class: 'btn btn-secondary', type: 'button', disabled: !r.configured, onClick: async (e) => {
+      e.currentTarget.disabled = true;
+      testResult.textContent = 'בודק…';
+      const t = await runAction(() => api('/relevance/test', { method: 'POST' }), {});
+      testResult.textContent = !t ? '' : t.ok
+        ? `החיבור תקין (${t.model}, ${t.ms} מ"ש). ציון לדוגמה: ${t.score}.`
+        : `החיבור נכשל${t.status ? ` (${t.status})` : ''}: ${t.error}`;
+      e.currentTarget.disabled = false;
+    } }, 'בדיקת חיבור')),
+  testResult);
+  return form;
+}
+
 function activeProviderCard() {
   const m = state.models;
   const titleId = 'models-active-title';
@@ -747,6 +797,7 @@ function renderModels({ focus } = {}) {
     h('p', { class: 'small muted', text: 'מפתחות נשמרים מוצפנים ואינם מוצגים שוב לאחר השמירה. לפני השמירה המפתח נבדק מול הספק.' }),
     activeProviderCard(),
     ...state.models.providers.map(providerCard),
+    relevanceCard(),
   ].filter(Boolean));
   if (focus) document.getElementById(focus)?.focus();
 }
