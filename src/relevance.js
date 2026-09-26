@@ -57,7 +57,18 @@ async function runJev(state, questions, { signal } = {}) {
     const message = body?.errors?.map((e) => e.message).join('; ') || `HTTP ${res.status}`;
     throw new JevError(res.status, message.slice(0, 300));
   }
-  return body?.result ?? body;
+  // The model's answer, wherever the REST envelope puts it ({ result: {...} }, { result: { output } }, or bare).
+  const candidates = [body?.result?.output, body?.result?.response, body?.result, body?.output, body];
+  const answer = candidates.find((c) => c && typeof c === 'object' && c.answers) ?? body?.result ?? body;
+  return Object.assign(answer, { raw: body });
+}
+
+// A short picture of a reply's structure (keys and types, no content), for when no score could be read from it.
+function shapeOf(value, depth = 0) {
+  if (value == null || typeof value !== 'object') return typeof value;
+  if (depth > 3) return '…';
+  if (Array.isArray(value)) return [value.length ? shapeOf(value[0], depth + 1) : 'empty'];
+  return Object.fromEntries(Object.entries(value).filter(([k]) => k !== 'raw').slice(0, 12).map(([k, v]) => [k, shapeOf(v, depth + 1)]));
 }
 
 const RELEVANCE_QUESTION = {
@@ -182,7 +193,14 @@ export async function testConnection() {
       'תיק המקור:\nנאשם 1: החזקת סם שלא לצריכה עצמית · פקודת הסמים המסוכנים · סעיף 7(א)+(ג) רישא | סמים: קוקאין 30 גרם\n\nתוצאת החיפוש:\nגזר דין: ת"פ 1234-01-24 מדינת ישראל נ\' פלוני\nסמים בתיק: קוקאין 25 גרם\nתקציר: הנאשם הורשע בהחזקת 25 גרם קוקאין שלא לצריכה עצמית.',
       RELEVANCE_QUESTION,
     );
-    return { ok: true, model: result?.model ?? MODEL, score: result?.answers?.relevance?.score ?? null, ms: Date.now() - started };
+    const score = result?.answers?.relevance?.score ?? null;
+    return {
+      ok: score != null,
+      model: result?.model ?? MODEL,
+      score,
+      ...(score == null ? { error: 'התשובה לא כללה ציון', shape: JSON.stringify(shapeOf(result.raw)).slice(0, 600) } : {}),
+      ms: Date.now() - started,
+    };
   } catch (err) {
     return { ok: false, status: err.status ?? null, error: err.message, ms: Date.now() - started };
   }
