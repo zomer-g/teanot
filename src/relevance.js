@@ -57,8 +57,9 @@ async function runJev(state, questions, { signal } = {}) {
     const message = body?.errors?.map((e) => e.message).join('; ') || `HTTP ${res.status}`;
     throw new JevError(res.status, message.slice(0, 300));
   }
-  // The model's answer, wherever the REST envelope puts it ({ result: {...} }, { result: { output } }, or bare).
-  const candidates = [body?.result?.output, body?.result?.response, body?.result, body?.output, body];
+  // The model's answer, wherever the REST envelope puts it. Workers AI answers third-party models as
+  // { result: { state, result: { model, answers, usage } } }; the docs show the inner object bare.
+  const candidates = [body?.result?.result, body?.result?.output, body?.result?.response, body?.result, body?.output, body];
   const answer = candidates.find((c) => c && typeof c === 'object' && c.answers) ?? body?.result ?? body;
   return Object.assign(answer, { raw: body });
 }
