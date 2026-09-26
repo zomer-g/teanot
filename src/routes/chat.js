@@ -342,7 +342,7 @@ chatRouter.post('/tagit/sentencing/more', requireActive, tagitLimit, async (req,
     await recordTagitCall({ account: req.account, conversationId: conversation.id, turnId, detail: { action, label: parsed.data.label, page, total: result.total, returned: result.items.length } });
     const relevance = await applyRelevance(result, { account: req.account, conversationId: conversation.id, turnId, corpus, label: parsed.data.label });
     await finishTurn(turnId, 'completed');
-    res.json({ page: result.page, total: result.total, items: relevance.items, ...relevanceUi(relevance, req.account) });
+    res.json({ page: result.page, total: result.total, items: relevance.items, ...relevanceUi(relevance) });
   } catch (err) {
     console.error('[tagit] more failed', err);
     await recordTagitCall({ account: req.account, conversationId: conversation.id, turnId, detail: { action, label: parsed.data.label, page, error: err.message } });

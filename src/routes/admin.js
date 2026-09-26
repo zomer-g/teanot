@@ -162,6 +162,7 @@ async function relevancePayload() {
 const relevanceSchema = z.object({
   mode: z.enum(MODES),
   threshold: z.number().min(0).max(LEVELS.length - 1),
+  minShown: z.number().int().min(0).max(30),
 }).strict();
 
 adminRouter.put('/relevance', async (req, res) => {

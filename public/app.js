@@ -299,7 +299,7 @@ function renderApp() {
   const sendBtn = h('button', { class: 'send-btn', type: 'button', 'aria-label': 'שליחה', svg: ICONS.send, onClick: () => (state.busy ? stopTurn() : send()) });
   const attachBtn = h('button', { class: 'attach-btn', type: 'button', 'aria-label': 'צירוף קובץ Word, PDF או טקסט', title: 'צירוף קובץ Word, PDF או טקסט', svg: ICONS.attach, onClick: () => fileInput.click() });
   // Opens the search-setup form again in a follow-up, for what is easier to set in the form than to describe.
-  const setupBtn = h('button', { class: 'link-btn setup-reopen', type: 'button', hidden: true, onClick: () => openSearchForm() },
+  const setupBtn = h('button', { class: 'btn btn-secondary btn-sm setup-reopen', type: 'button', hidden: true, onClick: () => openSearchForm() },
     'פתיחת טופס החיפוש מחדש');
   const dropTarget = h('div', { class: 'drop-target' },
     attachment,
@@ -310,11 +310,13 @@ function renderApp() {
       h('p', { id: hintId, class: 'sr-only', text: 'Enter שולח, Shift+Enter מוסיף שורה חדשה. קובץ מצרפים בכפתור הצירוף או בגרירה.' }),
       composerError,
       h('div', { class: 'composer-tools' }, setupBtn),
-      dropTarget,
-      h('p', { class: 'composer-foot' },
-        h('span', { class: 'foot-long', text: 'התוצאות מבוססות על מאגר TAG-IT ומיועדות לסיוע במחקר משפטי. יש לבדוק כל תוצאה מול המקור. ' }),
-        h('span', { class: 'foot-short', text: 'לסיוע במחקר בלבד; יש לבדוק מול המקור. ' }),
-        h('a', { href: '/accessibility', text: 'הצהרת נגישות' }), ' · ', h('a', { href: '/privacy', text: 'מדיניות פרטיות' }))));
+      dropTarget));
+  // The footer stays at the bottom of the page when the composer moves to the middle of the welcome screen.
+  const siteFoot = h('footer', { class: 'composer-foot' },
+    h('span', { class: 'foot-long', text: 'התוצאות מבוססות על מאגר TAG-IT ומיועדות לסיוע במחקר משפטי. יש לבדוק כל תוצאה מול המקור. ' }),
+    h('span', { class: 'foot-short', text: 'לסיוע במחקר בלבד; יש לבדוק מול המקור. ' }),
+    h('a', { href: '/accessibility', text: 'הצהרת נגישות' }), ' · ', h('a', { href: '/privacy', text: 'מדיניות פרטיות' }),
+    ' · ', h('span', { class: 'foot-contact' }, 'גיא זומר, ', h('a', { href: 'mailto:guy@z-g.co.il', dir: 'ltr', text: 'guy@z-g.co.il' })));
 
   const alertsBox = h('div', { class: 'llm-alerts', hidden: true });
   const exportBar = renderExportBar();
@@ -323,7 +325,8 @@ function renderApp() {
     alertsBox,
     exportBar.el,
     thread,
-    composer);
+    composer,
+    siteFoot);
   root.replaceChildren(h('div', { class: 'app-shell' }, sidebar, main));
 
   ['dragenter', 'dragover'].forEach((type) => main.addEventListener(type, (e) => {
@@ -360,7 +363,7 @@ function renderApp() {
   syncSidebar();
 
   ui = {
-    sidebar, alertsBox, exportBar, setupBtn, newButton, conversationList, quota, thread, threadInner, textarea, sendBtn, attachBtn, attachment, fileInput, composerError,
+    sidebar, main, composer, siteFoot, alertsBox, exportBar, setupBtn, newButton, conversationList, quota, thread, threadInner, textarea, sendBtn, attachBtn, attachment, fileInput, composerError,
     closeSidebar: () => setSidebar(false),
   };
   showWelcome();
@@ -389,17 +392,28 @@ function clearComposerError() {
   ui.composerError.textContent = '';
 }
 
+// The new-conversation screen: the composer sits in the middle, large, with a short account of how the system works.
 function showWelcome() {
-  const step = (n, title, body) => h('li', { class: 'step' },
-    h('span', { class: 'step-num', 'aria-hidden': 'true', text: n }), h('h3', { text: title }), h('p', { text: body }));
+  const slot = h('div', { class: 'welcome-composer' });
   ui.threadInner.replaceChildren(h('div', { class: 'welcome' },
     h('div', { class: 'gold-bar' }),
     h('h2', { text: 'איתור גזרי דין והנחיות לפי כתב אישום או הכרעת דין' }),
-    h('p', { text: 'צרפו קובץ Word או PDF, או הדביקו את נוסח המסמך. המערכת תזהה את סעיפי האישום או ההרשעה של כל נאשם ותאתר גזרי דין או הנחיות רלוונטיים ממאגר TAG‑IT.' }),
-    h('ol', { class: 'steps' },
-      step('1', 'צירוף המסמך', 'כתב אישום או הכרעת דין, כקובץ או כטקסט.'),
-      step('2', 'זיהוי העבירות', 'סעיפים ונתונים מהותיים לכל נאשם, כמו סוג הסם וכמותו.'),
-      step('3', 'גזרי דין והנחיות', 'ממוינים לפי חומרת העונש, עם סינון לפי נתוני גזירת העונש ומקורות ההנחיות.'))));
+    h('p', { class: 'welcome-lead', text: 'הדביקו כאן את נוסח כתב האישום או הכרעת הדין, או צרפו קובץ Word או PDF.' }),
+    slot,
+    h('div', { class: 'welcome-about' },
+      h('h3', { text: 'איך זה עובד' }),
+      h('p', { text: 'המערכת קוראת את המסמך ומזהה לכל נאשם את העבירות, הסעיפים והנתונים המהותיים לענישה, כמו סוג הסם וכמותו, הנשק או הנזק. לפיהם היא מחפשת תיקים דומים במאגר הענישה של TAG‑IT: גזרי דין בהליכים פליליים בערכאה הדיונית בלבד, ללא פסקי דין בערעור. לצדם אפשר לחפש גם הסדרים מותנים והנחיות של הפרקליטות, המשטרה והיועצת המשפטית לממשלה.' }),
+      h('p', { text: 'כל תוצאה עוברת מודל נוסף שמעריך עד כמה התיק דומה לתיק שלכם. כך מוצגות התוצאות הרלוונטיות ביותר, ואפשר להרחיב או לצמצם את הרשימה בלחיצה. גזרי הדין ממוינים לפי חומרת העונש, ובסוף מוצג סיכום עם טווח הענישה. זהו כלי עזר למחקר: יש לבדוק כל תוצאה מול המקור.' }))));
+  setWelcomeMode(true, slot);
+}
+
+// Moves the composer into the middle of the welcome screen, or back to the bottom of the page.
+function setWelcomeMode(on, slot = null) {
+  const focused = document.activeElement === ui.textarea;
+  ui.main.classList.toggle('welcome-mode', on);
+  if (on && slot) slot.append(ui.composer);
+  else if (!on && ui.composer.parentElement !== ui.main) ui.main.insertBefore(ui.composer, ui.siteFoot);
+  if (focused) ui.textarea.focus();
 }
 
 function setBusy(busy) {
@@ -556,6 +570,7 @@ function renderConversation({ conversation, turns, running, lastRequest }, { foc
   document.title = `${title} · ${APP_TITLE}`;
   history.replaceState(null, '', `#c=${conversation.id}`);
   const heading = h('h2', { class: 'sr-only', tabindex: '-1', text: `שיחה: ${title}` });
+  setWelcomeMode(false);
   ui.threadInner.replaceChildren(heading);
   ui.closeSidebar();
   renderConversationList();
@@ -697,6 +712,7 @@ async function send({ answers = null, text: presetText = null } = {}) {
   if (answers) form.append('answers', JSON.stringify(answers));
 
   if (!state.currentId) ui.threadInner.replaceChildren(h('h2', { class: 'sr-only', text: 'שיחה חדשה' }));
+  setWelcomeMode(false);
   ui.threadInner.querySelectorAll('.questions:not(.answered)').forEach(disableQuestions);
   const isPasted = !file && !answers && text.length > PASTED_DOCUMENT_CHARS;
   renderUserMessage({
@@ -1035,7 +1051,7 @@ function clampedText(text, context) {
   return [p, toggle];
 }
 
-function renderRuling(r, rank, corpus = SENTENCING) {
+function renderRuling(r, rank, corpus = SENTENCING, relevanceMode = null) {
   const severityClass = r.prisonMonths >= 36 ? 'severity-high' : r.prisonMonths > 0 ? 'severity-mid' : '';
   const titleId = nextId('ruling');
   const detailsId = nextId('details');
@@ -1060,7 +1076,7 @@ function renderRuling(r, rank, corpus = SENTENCING) {
       h('div', {},
         h('h4', { class: 'result-title', id: titleId }, externalLink(r.fileUrl, r.title)),
         h('p', { class: 'result-meta', text: [r.court, fmtDate(r.date), r.caseNumber && !r.title.includes(r.caseNumber) ? r.caseNumber : null].filter(Boolean).join(' · ') }),
-        h('div', { class: 'result-sentence' }, sentenceBadges(r), relevanceBadge(r)),
+        h('div', { class: 'result-sentence' }, sentenceBadges(r), relevanceBadge(r, relevanceMode)),
         r.snippet ? h('p', { class: 'result-summary small muted', text: r.snippet }) : null,
         clampedText(r.summary, r.title),
         h('div', { class: 'result-actions' },
@@ -1071,61 +1087,100 @@ function renderRuling(r, rank, corpus = SENTENCING) {
         details)));
 }
 
-// The relevance score (0–3) of a result, for admins only: they calibrate the threshold from it.
+// ---------- Relevance of results to the case ----------
+// Each result carries a relevance score (0–3) when the admin turned scoring on. Users see a term, not the number,
+// and step between levels with "expand" / "narrow"; the most relevant results are always shown.
 const isAdmin = () => state.me?.user?.role === 'admin';
-function relevanceBadge(r) {
-  if (!isAdmin() || !r.relevance) return null;
+const RELEVANCE_LEVELS = [
+  { min: 2.5, label: 'רלוונטיים מאוד', term: 'רלוונטי מאוד', tone: 'high' },
+  { min: 1.5, label: 'רלוונטיים', term: 'רלוונטי', tone: 'mid' },
+  { min: 0.5, label: 'רלוונטיים חלקית', term: 'רלוונטי חלקית', tone: 'low' },
+  { min: -Infinity, label: 'כל התוצאות', term: 'רלוונטיות נמוכה', tone: 'none' },
+];
+const levelOfScore = (score) => RELEVANCE_LEVELS.find((level) => score >= level.min);
+// The level the list opens at: the highest one within the admin's threshold.
+const startLevel = (threshold) => Math.max(0, RELEVANCE_LEVELS.findIndex((level) => level.min <= (threshold ?? 1.5)));
+
+function relevanceBadge(r, mode) {
+  if (!r.relevance || !mode || mode === 'off' || (mode === 'admin' && !isAdmin())) return null;
   const { score } = r.relevance;
-  const level = score >= 2.5 ? 'high' : score >= 1.5 ? 'mid' : 'low';
-  return h('span', { class: `badge badge-relevance relevance-${level}`, title: 'ציון רלוונטיות לתיק (0–3), מוצג למנהלים בלבד', text: `רלוונטיות ${score.toFixed(1)}` });
+  const level = levelOfScore(score);
+  // Admins also see the number, to calibrate the threshold.
+  const text = mode === 'admin' ? `רלוונטיות ${score.toFixed(1)}` : isAdmin() ? `${level.term} (${score.toFixed(1)})` : level.term;
+  return h('span', { class: `badge badge-relevance relevance-${level.tone}`, title: 'מידת הדמיון לתיק שבשיחה, כפי שהעריך מודל נוסף', text });
 }
+
+// Which results a level shows: every result at or above it, and always the `minShown` most relevant ones.
+// A result without a score is always shown.
+function visibleByRelevance(items, min, minShown) {
+  const top = new Set([...items].filter((r) => r.relevance).sort((a, b) => b.relevance.score - a.relevance.score)
+    .slice(0, minShown).map((r) => String(r.id)));
+  return items.filter((r) => !r.relevance || r.relevance.score >= min || top.has(String(r.id)));
+}
+
+// Results left out by the current relevance level, per kind ("ruling:123"): kept out of exports.
+const hiddenByRelevance = new Set();
 
 // What tells the two document corpora apart on screen.
 const SENTENCING = { kind: 'ruling', corpus: 'sentencing', heading: 'גזרי דין', many: 'גזרי דין', order: 'מהעונש', open: 'פתיחת גזר הדין', empty: 'לא נמצאו גזרי דין התואמים את החיפוש.', register: (items) => registerRulings(items) };
 const ARRANGEMENTS = { kind: 'arrangement', corpus: 'arrangements', heading: 'הסדרים מותנים', many: 'הסדרים מותנים', order: 'מההסדר', open: 'פתיחת ההסדר', empty: 'לא נמצאו הסדרים מותנים התואמים את החיפוש.', register: (items) => registerArrangements(items) };
 
 function renderResults(data, block, corpus = SENTENCING) {
-  corpus.register(data.items);
+  // Results saved before the level buttons existed kept the ones under the threshold apart, in hiddenItems.
+  const items = [...data.items, ...(data.hiddenItems ?? [])];
+  corpus.register(items);
   const PAGE = 10;
-  const items = [...data.items];
-  let shown = 0;
+  let shown = PAGE;
   let page = data.page || 1;
   const headingId = nextId('results');
   const list = h('ol', { class: 'result-list' });
   const more = h('div', { class: 'results-more' });
-  // Results the relevance filter hid: a count for everyone, and for admins the results themselves.
-  let hiddenCount = data.relevance?.hidden ?? 0;
-  const hiddenNote = h('p', { class: 'notice-box small', hidden: !hiddenCount });
-  const hiddenList = h('ol', { class: 'result-list' });
-  const hiddenBox = h('details', { class: 'hidden-results', hidden: true },
-    h('summary', { text: 'התוצאות שהוסתרו (מוצג למנהלים בלבד)' }), hiddenList);
-  const addHidden = (count, hiddenItems) => {
-    hiddenCount += count;
-    hiddenNote.hidden = !hiddenCount;
-    hiddenNote.textContent = `הוסתרו ${hiddenCount} תוצאות שציון הרלוונטיות שלהן לתיק נמוך מ-${data.relevance?.threshold ?? ''}.`;
-    for (const r of hiddenItems ?? []) hiddenList.append(renderRuling(r, '–', corpus));
-    hiddenBox.hidden = !hiddenList.childElementCount;
-  };
-  addHidden(0, data.hiddenItems);
 
-  const renderMore = (focusFirstNew = false) => {
-    const next = items.slice(shown, shown + PAGE);
-    const firstNew = next.map((r, i) => {
-      const li = renderRuling(r, shown + i + 1, corpus);
-      list.append(li);
-      return li;
-    })[0];
-    shown += next.length;
-    if (focusFirstNew && firstNew) {
-      firstNew.querySelector('.result-title a')?.focus();
-      announce(`נוספו ${next.length} ${corpus.many}. מוצגים ${shown}.`);
+  // Relevance: in the users' mode the list opens at the admin's threshold and can be expanded or narrowed.
+  const mode = data.relevance?.mode ?? 'off';
+  const filtering = mode === 'filter' && items.some((r) => r.relevance);
+  const minShown = data.relevance?.minShown ?? 5;
+  let level = startLevel(data.relevance?.threshold);
+  const levelStatus = h('p', { class: 'relevance-status small', role: 'status' });
+  const narrowBtn = h('button', { class: 'btn btn-secondary btn-sm', type: 'button', onClick: () => setLevel(level - 1) }, 'צמצום התוצאות');
+  const widenBtn = h('button', { class: 'btn btn-secondary btn-sm', type: 'button', onClick: () => setLevel(level + 1) }, 'הרחבת התוצאות');
+  const levelBar = filtering ? h('div', { class: 'relevance-bar', role: 'group', 'aria-label': `רלוונטיות ${corpus.many}` },
+    levelStatus, h('div', { class: 'relevance-actions' }, narrowBtn, widenBtn)) : null;
+
+  const visible = () => (filtering ? visibleByRelevance(items, RELEVANCE_LEVELS[level].min, minShown) : items);
+  const syncHidden = () => {
+    const shownIds = new Set(visible().map((r) => String(r.id)));
+    for (const r of items) {
+      const key = `${corpus.kind}:${r.id}`;
+      if (shownIds.has(String(r.id))) hiddenByRelevance.delete(key);
+      else hiddenByRelevance.add(key);
     }
+    ui.exportBar?.sync();
+  };
+
+  const render = ({ focusIndex = null } = {}) => {
+    const all = visible();
+    const slice = all.slice(0, shown);
+    list.replaceChildren(...slice.map((r, i) => renderRuling(r, i + 1, corpus, mode)));
+    if (focusIndex != null) list.children[focusIndex]?.querySelector('.result-title a')?.focus();
+    if (filtering) {
+      levelStatus.textContent = `מוצגים ${fmtNumber(all.length)} מתוך ${fmtNumber(items.length)} שנטענו · ${RELEVANCE_LEVELS[level].label}${all.length > items.filter((r) => !r.relevance || r.relevance.score >= RELEVANCE_LEVELS[level].min).length ? ` (ולפחות ${minShown} הרלוונטיים ביותר)` : ''}`;
+      narrowBtn.disabled = level === 0;
+      widenBtn.disabled = level === RELEVANCE_LEVELS.length - 1;
+    }
+    syncHidden();
     const canFetch = data.total != null && items.length < data.total && data.params;
     more.replaceChildren();
-    if (shown < items.length || canFetch) {
+    if (slice.length < all.length || canFetch) {
       more.append(h('button', { class: 'btn btn-secondary btn-sm', type: 'button', onClick: async (e) => {
         const button = e.currentTarget;
-        if (shown < items.length) return renderMore(true);
+        const before = slice.length;
+        if (slice.length < all.length) {
+          shown += PAGE;
+          render({ focusIndex: before });
+          announce(`מוצגים ${Math.min(shown, all.length)} ${corpus.many}.`);
+          return;
+        }
         button.disabled = true;
         button.textContent = 'טוען…';
         announce('טוען תוצאות נוספות…');
@@ -1138,11 +1193,12 @@ function renderResults(data, block, corpus = SENTENCING) {
           if (!res.ok) throw new Error();
           const nextPage = await res.json();
           page = nextPage.page;
-          if (!nextPage.items.length && !nextPage.relevance?.hidden) { data.total = items.length; }
-          if (nextPage.relevance) addHidden(nextPage.relevance.hidden, nextPage.hiddenItems);
+          if (!nextPage.items.length) { data.total = items.length; }
           corpus.register(nextPage.items);
           items.push(...nextPage.items);
-          renderMore(true);
+          shown += PAGE;
+          render({ focusIndex: before });
+          announce(`נטענו ${nextPage.items.length} ${corpus.many} נוספים.`);
         } catch {
           button.disabled = false;
           button.textContent = 'הטעינה נכשלה · נסו שוב';
@@ -1151,7 +1207,13 @@ function renderResults(data, block, corpus = SENTENCING) {
       } }, 'הצגת תוצאות נוספות'));
     }
   };
-  renderMore();
+  const setLevel = (next) => {
+    level = Math.max(0, Math.min(RELEVANCE_LEVELS.length - 1, next));
+    shown = Math.max(shown, PAGE);
+    render();
+    announce(levelStatus.textContent);
+  };
+  render();
 
   const count = data.total != null ? `נמצאו ${fmtNumber(data.total)} ${corpus.many}` : `${items.length} ${corpus.many}`;
   return h('section', { class: 'results', 'aria-labelledby': headingId },
@@ -1159,10 +1221,9 @@ function renderResults(data, block, corpus = SENTENCING) {
       h('h3', { id: headingId, text: `${corpus.heading} · ${data.label}` }),
       h('p', { class: 'results-query', text: `${count} · ${data.params?.sort === 'date' ? 'מהחדש לישן' : `ממוינים ${corpus.order} ${data.params?.sort_direction === 'desc' ? 'החמור לקל' : 'הקל לחמור'}`}` })),
     data.textQueryDropped ? h('p', { class: 'notice-box small', text: 'מאגר TAG-IT לא איפשר לשלב את חיפוש הטקסט עם המסננים, ולכן החיפוש רץ לפי המסננים בלבד. ייתכן שחלק מהתוצאות אינן קשורות לעבירה.' }) : null,
-    hiddenNote,
+    levelBar,
     items.length ? list : h('div', { class: 'notice-box', text: corpus.empty }),
-    more,
-    hiddenBox);
+    more);
 }
 
 function renderGuidelines(data) {
@@ -1210,9 +1271,11 @@ const EXPORT_SCOPES = {
 };
 
 const inScope = (scope, kind) => scope === 'all' || scope === `${kind}s`;
+// The results of one kind that the relevance level currently shows.
+const shownKnown = (map, kind) => [...map.values()].filter((data) => !hiddenByRelevance.has(`${kind}:${data.id}`));
 const exportItems = (scope) => [
-  ...(inScope(scope, 'ruling') ? [...knownRulings.values()].slice(0, MAX_RULINGS).map((data) => ({ kind: 'ruling', id: String(data.id), data })) : []),
-  ...(inScope(scope, 'arrangement') ? [...knownArrangements.values()].slice(0, MAX_RULINGS).map((data) => ({ kind: 'arrangement', id: String(data.id), data })) : []),
+  ...(inScope(scope, 'ruling') ? shownKnown(knownRulings, 'ruling').slice(0, MAX_RULINGS).map((data) => ({ kind: 'ruling', id: String(data.id), data })) : []),
+  ...(inScope(scope, 'arrangement') ? shownKnown(knownArrangements, 'arrangement').slice(0, MAX_RULINGS).map((data) => ({ kind: 'arrangement', id: String(data.id), data })) : []),
   ...(inScope(scope, 'guideline') ? [...knownGuidelines.values()].map((data) => ({ kind: 'guideline', id: String(data.id), data })) : []),
 ];
 
@@ -1340,8 +1403,8 @@ function renderExportBar() {
       h('p', { class: 'small muted', style: 'margin:0', text: `קובץ Word כולל את תוכן האתר בלבד. הטקסט בגופן Arial בגודל 13, ממורכז, ברווח שורות 1.5. מיוצאים עד ${MAX_RULINGS} גזרי דין ועד ${MAX_RULINGS} הסדרים מותנים: הראשונים שהוצגו בשיחה.` }),
       status));
   const sync = () => {
-    const r = Math.min(knownRulings.size, MAX_RULINGS);
-    const a = Math.min(knownArrangements.size, MAX_RULINGS);
+    const r = Math.min(shownKnown(knownRulings, 'ruling').length, MAX_RULINGS);
+    const a = Math.min(shownKnown(knownArrangements, 'arrangement').length, MAX_RULINGS);
     const g = knownGuidelines.size;
     el.hidden = !r && !a && !g;
     counts.textContent = `(${[r ? `${r} גזרי דין` : null, a ? `${a} הסדרים מותנים` : null, g ? `${g} הנחיות` : null].filter(Boolean).join(', ')})`;
@@ -1379,6 +1442,7 @@ function registerGuidelines(items) {
   ui.exportBar?.sync();
 }
 function resetCitations() {
+  hiddenByRelevance.clear();
   knownRulings.clear();
   knownArrangements.clear();
   knownGuidelines.clear();

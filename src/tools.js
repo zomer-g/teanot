@@ -277,14 +277,11 @@ const forModel = (setup, corpus) => {
   return { ...(chosen ?? {}), ...(filters ? { case_filters: filters } : {}) };
 };
 
-// What the result card shows about relevance: the mode and threshold, how many were hidden, and for admins the
-// hidden results themselves (to calibrate the threshold).
-export function relevanceUi(relevance, account) {
+// What the result card needs to show relevance: the mode, the level the list opens at, and how many of the most
+// relevant results it always shows.
+export function relevanceUi(relevance) {
   if (relevance.mode === 'off') return {};
-  return {
-    relevance: { mode: relevance.mode, threshold: relevance.threshold, hidden: relevance.hidden.length },
-    ...(account.role === 'admin' && relevance.hidden.length ? { hiddenItems: relevance.hidden } : {}),
-  };
+  return { relevance: { mode: relevance.mode, threshold: relevance.threshold, minShown: relevance.minShown } };
 }
 
 // Whether the model set a parameter at all (an empty list or null is "not set").
@@ -419,19 +416,20 @@ export async function executeTool(toolUse, ctx) {
         await recordTagitCall({ account, conversationId, turnId, detail: { action, label: params.label, filter: found.filter, sort: params.sort, sort_direction: params.sort_direction, text_query: params.text_query || undefined, total: found.total, returned: found.items.length } });
         // Each result scored for relevance to the case (when the admin turned it on); under the threshold, hidden.
         const relevance = await applyRelevance(found, { account, conversationId, turnId, corpus, label: params.label, signal });
-        const result = { ...found, items: relevance.items };
+        // The user gets every result (the list opens at the threshold); the model summarizes the ones shown.
+        const result = { ...found, items: relevance.shown };
         const data = {
-          label: params.label, params, total: result.total, page: result.page, size: result.size, items: result.items, corpus,
-          textQueryDropped: result.textQueryDropped || undefined,
-          ...relevanceUi(relevance, account),
+          label: params.label, params, total: found.total, page: found.page, size: found.size, items: relevance.items, corpus,
+          textQueryDropped: found.textQueryDropped || undefined,
+          ...relevanceUi(relevance),
         };
         activity(label, 'done', { summary: result.total != null ? `${result.total} תוצאות` : `${result.items.length} תוצאות` });
         emit({ type: uiType, toolUseId: toolUse.id, data });
         return {
           block: toolResult(toolUse, {
             ...sentencingForModel(result, params, corpus),
-            hidden_low_relevance: relevance.hidden.length
-              ? `${relevance.hidden.length} results on this page scored below the relevance threshold and were hidden from the user; they are not in items.`
+            less_relevant_not_listed: relevance.items.length > relevance.shown.length
+              ? `${relevance.items.length - relevance.shown.length} results on this page scored as less relevant to the case; the user sees them only after expanding the list, and they are not in items.`
               : undefined,
             applied_user_setup: forModel(ctx.searchSetup, corpus),
           }),

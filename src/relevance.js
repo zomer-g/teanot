@@ -1,7 +1,8 @@
 // Relevance of each search result to the user's case, scored by TypeSafe's Jev evaluation model on Cloudflare
 // Workers AI (typesafe/jev, zero data retention). The admin chooses the mode in the admin panel: off, scores shown
-// to admins only (for calibration), or filter (results under the threshold are hidden from users, from the model's
-// summary and from exports). Scoring never blocks a search: a failed or missing score keeps the result.
+// to admins only (for calibration), or filter: users see a term instead of the score, the list opens at the
+// threshold (and always shows the minShown most relevant results), and they widen or narrow it themselves; the
+// model's summary and the exports cover what is shown. Scoring never blocks a search: a failed or missing score keeps the result.
 import { query } from './db.js';
 import { getSettings, setSetting } from './usage.js';
 
@@ -20,7 +21,7 @@ export const LEVELS = [
   'דומה מאוד: אותה עבירה ונסיבות דומות (סוג וכמות הסם, תפקיד, היקף)',
 ];
 
-const DEFAULT_SETTINGS = { mode: 'off', threshold: 1.5 };
+const DEFAULT_SETTINGS = { mode: 'off', threshold: 1.5, minShown: 5 };
 export const MODES = ['off', 'admin', 'filter'];
 
 export const isConfigured = () => Boolean(process.env.CLOUDFLARE_ACCOUNT_ID && process.env.CLOUDFLARE_AI_TOKEN);
@@ -30,8 +31,8 @@ export async function relevanceSettings() {
   return { ...DEFAULT_SETTINGS, ...stored };
 }
 
-export async function saveRelevanceSettings({ mode, threshold }) {
-  await setSetting('relevance', { mode, threshold });
+export async function saveRelevanceSettings({ mode, threshold, minShown }) {
+  await setSetting('relevance', { mode, threshold, minShown });
   return relevanceSettings();
 }
 
@@ -161,11 +162,19 @@ async function recordUsage({ account, conversationId, turnId, inputTokens, detai
   );
 }
 
-// Applied to one page of results. Returns { items, hidden, mode, threshold } where items are what users see.
-// Admins also get the hidden items back, to calibrate the threshold.
+// Which results the list opens with: those at or above the threshold, and always the minShown most relevant.
+// A result without a score is always shown. The browser applies the same rule (visibleByRelevance in app.js).
+export function openingSet(items, threshold, minShown) {
+  const top = new Set([...items].filter((i) => i.relevance).sort((a, b) => b.relevance.score - a.relevance.score)
+    .slice(0, minShown).map((i) => String(i.id)));
+  return items.filter((i) => !i.relevance || i.relevance.score >= threshold || top.has(String(i.id)));
+}
+
+// Applied to one page of results. Every item comes back (scored); `shown` is what the list opens with, which is
+// what the model summarizes.
 export async function applyRelevance(result, { account, conversationId, turnId, corpus, label, signal }) {
   const settings = await relevanceSettings();
-  const none = { items: result.items, hidden: [], mode: 'off', threshold: null };
+  const none = { items: result.items, shown: result.items, mode: 'off', threshold: null, minShown: null };
   if (settings.mode === 'off' || !isConfigured() || !result.items.length || !conversationId) return none;
   const { rows } = await query('SELECT analysis FROM conversations WHERE id = $1', [conversationId]);
   const caseDescription = caseText(rows[0]?.analysis);
@@ -175,14 +184,8 @@ export async function applyRelevance(result, { account, conversationId, turnId, 
     account, conversationId, turnId, inputTokens: scored.inputTokens,
     detail: { corpus, label, items: scored.items.length, failures: scored.failures || undefined, error: scored.lastError ?? undefined, mode: settings.mode, threshold: settings.threshold },
   }).catch((err) => console.warn('[relevance] usage not recorded', err.message));
-  if (settings.mode !== 'filter') return { items: scored.items, hidden: [], mode: settings.mode, threshold: settings.threshold };
-  const below = (item) => item.relevance && item.relevance.score < settings.threshold;
-  return {
-    items: scored.items.filter((item) => !below(item)),
-    hidden: scored.items.filter(below),
-    mode: 'filter',
-    threshold: settings.threshold,
-  };
+  const shown = settings.mode === 'filter' ? openingSet(scored.items, settings.threshold, settings.minShown) : scored.items;
+  return { items: scored.items, shown, mode: settings.mode, threshold: settings.threshold, minShown: settings.minShown };
 }
 
 // A single call on a fixed sample, for the admin panel's connection test.

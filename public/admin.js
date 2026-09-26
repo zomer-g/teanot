@@ -597,7 +597,7 @@ async function runAction(action, { success }) {
 const RELEVANCE_MODES = {
   off: 'כבוי',
   admin: 'ציונים למנהלים בלבד (לכיול): הציון מוצג על כל כרטיס למנהלים, ושום תוצאה לא מוסתרת',
-  filter: 'סינון: תוצאות מתחת לסף מוסתרות מהמשתמשים, מסיכום המודל ומהייצוא',
+  filter: 'למשתמשים: כל כרטיס מקבל מינוח (רלוונטי מאוד / רלוונטי / רלוונטי חלקית), הרשימה נפתחת בסף שנבחר ועם כפתורי הרחבה וצמצום; סיכום המודל והייצוא כוללים רק את המוצג',
 };
 
 function relevanceCard() {
@@ -614,11 +614,13 @@ function relevanceCard() {
   const thresholds = {};
   for (let v = 0.5; v <= r.levels.length - 1; v += 0.5) thresholds[String(v)] = `${v} ומעלה`;
   const threshold = select(thresholds, String(r.settings.threshold), { id: thresholdId });
+  const minId = 'relevance-min';
+  const minShown = h('input', { class: 'input', id: minId, type: 'number', min: 0, max: 30, step: 1, value: r.settings.minShown ?? 5, style: 'max-width:120px' });
   const testResult = h('p', { class: 'small', role: 'status' });
   const form = h('form', { class: 'card card-body', 'aria-labelledby': titleId, onSubmit: async (e) => {
     e.preventDefault();
     const mode = form.querySelector('input[name="relevance-mode"]:checked')?.value ?? 'off';
-    const payload = await runAction(() => api('/relevance', { method: 'PUT', body: { mode, threshold: Number(threshold.value) } }), { success: 'הגדרות הרלוונטיות נשמרו.' });
+    const payload = await runAction(() => api('/relevance', { method: 'PUT', body: { mode, threshold: Number(threshold.value), minShown: Math.max(0, Math.min(30, Number.parseInt(minShown.value, 10) || 0)) } }), { success: 'הגדרות הרלוונטיות נשמרו.' });
     if (payload) { state.models.relevance = payload; renderModels({ focus: titleId }); }
   } },
   h('h2', { class: 'card-title', id: titleId, tabindex: '-1', text: 'רלוונטיות התוצאות (Jev)' }),
@@ -626,7 +628,8 @@ function relevanceCard() {
     + r.levels.map((label, i) => `${i} – ${label}`).join(' · ') + '. בשיחה בלי מסמך לא מחושב ציון.' }),
   r.configured ? null : h('div', { class: 'notice-box', text: 'חסרים משתני הסביבה CLOUDFLARE_ACCOUNT_ID ו-CLOUDFLARE_AI_TOKEN. יש להגדיר אותם בשרת ולפרוס מחדש.' }),
   h('fieldset', { class: 'radio-group' }, h('legend', { class: 'label', text: 'מצב' }), modeRadios),
-  h('div', { class: 'field' }, h('label', { class: 'label', for: thresholdId, text: 'סף רלוונטיות להצגה (במצב סינון)' }), threshold),
+  h('div', { class: 'field' }, h('label', { class: 'label', for: thresholdId, text: 'הרמה שבה הרשימה נפתחת (במצב למשתמשים)' }), threshold),
+  h('div', { class: 'field' }, h('label', { class: 'label', for: minId, text: 'מספר התוצאות הרלוונטיות ביותר שמוצגות תמיד' }), minShown),
   h('p', { class: 'small muted', text: `החודש: ${fmtInt(r.month.calls)} חיפושים דורגו · ${fmtInt(r.month.tokens)} טוקנים · ${fmtUsd(r.month.cost)}` }),
   h('div', { class: 'row-actions' },
     h('button', { class: 'btn btn-accent', type: 'submit' }, 'שמירה'),
