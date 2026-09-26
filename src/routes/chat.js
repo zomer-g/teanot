@@ -313,14 +313,14 @@ export async function drainActiveTurns(timeoutMs) {
 const tagitLimit = rateLimit({ name: 'tagit', limit: 120, windowMs: TEN_MINUTES });
 
 // "Show more" on a result card: fetches the next page without spending model tokens.
-// Options for the search-setup form: sentencing flags (from the Z-G site's config), the punishments of
+// Options for the search-setup form: sentencing flags and drug-case fields (from the Z-G site's config), the punishments of
 // conditional arrangements and guideline sources.
 chatRouter.get('/search-options', requireActive, async (_req, res) => {
-  const [{ flags, source }, guidelineSources, arrangementPunishments] = await Promise.all([
+  const [{ flags, fields, source }, guidelineSources, arrangementPunishments] = await Promise.all([
     getSentencingFlags(), getGuidelineSources(), getArrangementPunishments(),
   ]);
   res.set('Cache-Control', 'private, max-age=300');
-  res.json({ sentencingFlags: flags, flagsSource: source, guidelineSources, arrangementPunishments, defaults: { sortDirection: 'asc' } });
+  res.json({ sentencingFlags: flags, sentencingFields: fields ?? [], flagsSource: source, guidelineSources, arrangementPunishments, defaults: { sortDirection: 'asc' } });
 });
 
 chatRouter.post('/tagit/sentencing/more', requireActive, tagitLimit, async (req, res) => {

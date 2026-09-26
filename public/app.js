@@ -133,7 +133,7 @@ const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const PASTED_DOCUMENT_CHARS = 1500;
 
 // following = id of a conversation whose turn is still running on the server after the stream was lost.
-const state = { me: null, conversations: [], currentId: null, busy: false, controller: null, following: null, file: null, searchSetup: null, includeSource: false, includeRaw: false };
+const state = { me: null, conversations: [], currentId: null, busy: false, controller: null, following: null, file: null, searchSetup: null, analysis: null, includeSource: false, includeRaw: false };
 const root = document.getElementById('root');
 let ui = {};
 
@@ -488,6 +488,7 @@ function newConversation({ focusComposer = true } = {}) {
   stopFollowing();
   state.currentId = null;
   state.searchSetup = null;
+  state.analysis = null;
   resetCitations();
   document.title = APP_TITLE;
   history.replaceState(null, '', location.pathname);
@@ -508,6 +509,7 @@ async function openConversation(id, { focusThread = false } = {}) {
 function renderConversation({ conversation, turns, running, lastRequest }, { focusThread = false } = {}) {
   state.currentId = conversation.id;
   state.searchSetup = conversation.search_setup ?? null;
+  state.analysis = conversation.analysis ?? null;
   resetCitations();
   for (const turn of turns) {
     for (const item of turn.ui?.items ?? []) {
@@ -886,6 +888,7 @@ function createAssistantBlock(conversationId) {
         enhanceTables(el);
         decorateLinks(el);
       } else if (item.type === 'analysis') {
+        state.analysis = item.data;
         el = renderAnalysis(item.data);
         if (!quiet) announce(item.data.is_supported ? 'הוצג ניתוח המסמך.' : 'המסמך אינו כתב אישום או הכרעת דין.');
       } else if (item.type === 'results') {
@@ -1396,6 +1399,158 @@ const FLAG_CHOICES = [['', 'הכל'], ['true', 'כן'], ['false', 'לא']];
 const clip = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 // Returns { el, answer() }. answer() gives { answer } for the chat API or { error, focus } when nothing is ticked.
+// ---------- Drug-case fields in the search-setup form ----------
+// The fields of the drug-sentencing search on z-g.co.il (served by /api/search-options from the shared config).
+
+const DRUG_NAMES_BY_SLUG = {
+  cannabis: 'קנאביס', cocaine: 'קוקאין', hashish: 'חשיש', heroin: 'הרואין', mdma: 'MDMA',
+  ketamine: 'קטמין', lsd: 'LSD', meth: 'מתאמפטמין', buprenorphine: 'בופרנורפין', psilocybin: 'פסילוצין',
+};
+const DRUG_TYPES_KEY = 'meta.drug_types';
+const QUANTITY_KEY = 'meta.drug_max_grams';
+const DRUG_ORDINANCE_KEY = 'meta.drug_ordinance_sections';
+const FIELD_GROUP_ORDER = ['סמים', 'עבירה', 'ענישה', ''];
+
+const allCounts = (analysis) => (analysis?.defendants ?? []).flatMap((d) => d.counts ?? []);
+const isDrugOrdinance = (count) => /סמים/.test(count?.law ?? '') || /סמים|סם /.test(count?.offense ?? '');
+
+function isDrugCase(analysis) {
+  return allCounts(analysis).some((count) => (count.drugs ?? []).length > 0 || isDrugOrdinance(count));
+}
+
+// A number around the document's quantity, rounded so the form shows a plain figure.
+const roundQuantity = (n) => (n >= 10 ? Math.round(n) : Math.round(n * 10) / 10);
+
+// What the document already says: the drugs, the Dangerous Drugs Ordinance sections, and for a single drug a
+// quantity range of about ±33% (the same default the assistant uses).
+function filtersFromAnalysis(analysis, fields) {
+  const byKey = new Map(fields.map((f) => [f.key, f]));
+  const initial = {};
+  const typesField = byKey.get(DRUG_TYPES_KEY);
+  const drugsByDefendant = (analysis?.defendants ?? []).map((d) => (d.counts ?? []).flatMap((c) => c.drugs ?? []));
+  const drugName = (drug) => (typesField?.options.includes(drug.name) ? drug.name : DRUG_NAMES_BY_SLUG[drug.slug] ?? null);
+  const names = [...new Set(drugsByDefendant.flat().map(drugName).filter(Boolean))].filter((n) => typesField?.options.includes(n));
+  if (typesField && names.length) initial[DRUG_TYPES_KEY] = names;
+  const quantityField = byKey.get(QUANTITY_KEY);
+  if (quantityField && names.length === 1) {
+    // The largest quantity any one defendant holds of that drug, all in one unit.
+    const totals = drugsByDefendant.map((drugs) => drugs.filter((d) => drugName(d) === names[0] && d.amount > 0));
+    const units = new Set(totals.flat().map((d) => d.unit ?? 'grams'));
+    const amount = Math.max(0, ...totals.map((drugs) => drugs.reduce((sum, d) => sum + d.amount, 0)));
+    if (amount > 0 && units.size === 1) {
+      const unit = units.has('units') ? 'n' : 'g';
+      if (unit === 'g' || quantityField.units?.some((u) => u.value === 'n')) {
+        initial[QUANTITY_KEY] = { min: roundQuantity(amount * 0.67), max: roundQuantity(amount * 1.33), unit };
+      }
+    }
+  }
+  const sectionsField = byKey.get(DRUG_ORDINANCE_KEY);
+  if (sectionsField) {
+    const tokens = allCounts(analysis).filter(isDrugOrdinance).flatMap((c) => c.section_tokens ?? []).map((t) => String(t).trim());
+    const sections = [...new Set(tokens)].filter((t) => sectionsField.options.includes(t));
+    if (sections.length) initial[DRUG_ORDINANCE_KEY] = sections;
+  }
+  return initial;
+}
+
+function renderCaseFilters(fields, { initial, live }) {
+  const readers = [];
+  const control = (field) => {
+    const value = initial?.[field.key];
+    const labelId = nextId('case-field');
+    if (field.control === 'multiselect') {
+      const boxes = field.options.map((option) => {
+        const boxId = nextId('case-option');
+        const box = h('input', { type: 'checkbox', id: boxId, checked: Array.isArray(value) && value.includes(option), disabled: !live });
+        return { option, box, el: h('label', { class: 'setup-source', for: boxId }, box, h('span', { text: field.optionLabels?.[option] ?? option })) };
+      });
+      readers.push({ field, read: () => {
+        const chosen = boxes.filter((b) => b.box.checked).map((b) => b.option);
+        return chosen.length ? chosen : null;
+      }, show: (v) => v.join(', ') });
+      return h('fieldset', { class: 'case-field case-field-wide' },
+        h('legend', { class: 'label', text: field.label }),
+        h('div', { class: 'setup-sources' }, boxes.map((b) => b.el)));
+    }
+    if (field.control === 'number' || field.control === 'yearrange') {
+      const years = field.control === 'yearrange';
+      const input = (bound, label) => {
+        const inputId = nextId('case-num');
+        const current = value?.[years ? (bound === 'min' ? 'from' : 'to') : bound];
+        const el = h('input', {
+          class: 'input', id: inputId, type: 'number', inputmode: years ? 'numeric' : 'decimal', min: years ? 1948 : 0,
+          max: years ? 2100 : null, step: years ? 1 : 'any', value: current ?? '', disabled: !live,
+          'aria-label': `${field.label}: ${label}`,
+        });
+        return { el, wrap: h('label', { class: 'case-range-part' }, h('span', { class: 'small', text: label }), el) };
+      };
+      const from = input('min', years ? 'משנה' : 'מ-');
+      const to = input('max', years ? 'עד שנה' : 'עד');
+      let unitSelect = null;
+      if (field.units?.length) {
+        unitSelect = h('select', { class: 'select', disabled: !live, 'aria-label': `${field.label}: יחידה` },
+          field.units.map((u) => h('option', { value: u.value, selected: (value?.unit ?? 'g') === u.value }, u.label)));
+      }
+      readers.push({ field, read: () => {
+        const a = from.el.value.trim();
+        const b = to.el.value.trim();
+        if (!a && !b) return null;
+        if (years) return { ...(a ? { from: a } : {}), ...(b ? { to: b } : {}) };
+        return { ...(a ? { min: Number(a) } : {}), ...(b ? { max: Number(b) } : {}), ...(unitSelect ? { unit: unitSelect.value } : {}) };
+      }, check: () => {
+        for (const part of [from.el, to.el]) {
+          const text = part.value.trim();
+          if (!text) continue;
+          const n = Number(text);
+          if (!Number.isFinite(n) || n < 0 || (years && !/^\d{4}$/.test(text))) {
+            return { error: `${field.label}: ${years ? 'יש להזין שנה בת ארבע ספרות.' : 'יש להזין מספר חיובי.'}`, focus: part };
+          }
+        }
+        const a = from.el.value.trim();
+        const b = to.el.value.trim();
+        if (a && b && Number(a) > Number(b)) return { error: `${field.label}: הערך הראשון גדול מהשני.`, focus: from.el };
+        return null;
+      }, show: (v) => {
+        const unit = v.unit ? ` ${field.units.find((u) => u.value === v.unit)?.label ?? ''}` : '';
+        const a = v.min ?? v.from;
+        const b = v.max ?? v.to;
+        return `${a != null && b != null ? `${a}–${b}` : a != null ? `מ-${a}` : `עד ${b}`}${unit}`;
+      } });
+      return h('div', { class: 'case-field', role: 'group', 'aria-labelledby': labelId },
+        h('span', { class: 'label', id: labelId, text: field.label }),
+        h('div', { class: 'case-range' }, from.wrap, to.wrap, unitSelect));
+    }
+    const inputId = nextId('case-input');
+    const el = field.control === 'select'
+      ? h('select', { class: 'select', id: inputId, disabled: !live },
+        h('option', { value: '' }, 'הכל'),
+        field.options.map((option) => h('option', { value: option, selected: value === option }, field.optionLabels?.[option] ?? option)))
+      : h('input', { class: 'input', id: inputId, type: 'text', maxlength: 100, value: value ?? '', disabled: !live });
+    readers.push({ field, read: () => el.value.trim() || null, show: (v) => v });
+    return h('div', { class: 'case-field' }, h('label', { class: 'label', for: inputId, text: field.label }), el);
+  };
+
+  const groups = new Map();
+  for (const field of fields) {
+    const group = FIELD_GROUP_ORDER.includes(field.group ?? '') ? field.group ?? '' : '';
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(field);
+  }
+  const el = h('div', { class: 'case-filters' },
+    FIELD_GROUP_ORDER.filter((g) => groups.has(g)).map((group) => h('div', { class: 'case-group' },
+      h('p', { class: 'case-group-title', text: group || 'בית המשפט והמועד' }),
+      h('div', { class: 'case-grid' }, groups.get(group).map(control)))));
+  return {
+    el,
+    values: () => Object.fromEntries(readers.map((r) => [r.field.key, r.read()]).filter(([, v]) => v != null)),
+    invalid: () => readers.map((r) => r.check?.()).find(Boolean) ?? null,
+    summary: () => readers.map((r) => {
+      const v = r.read();
+      return v == null ? null : `${r.field.label}: ${r.show(v)}`;
+    }).filter(Boolean),
+  };
+}
+
 function renderSearchSetup(q, { live, prior }) {
   const id = nextId('setup');
   const textId = `${id}-text`;
@@ -1425,8 +1580,19 @@ function renderSearchSetup(q, { live, prior }) {
   const flagSelects = new Map();
   const flagsGrid = h('div', { class: 'setup-flags' }, h('p', { class: 'small muted', text: 'טוען את נתוני גזירת העונש…' }));
   const sentencingSort = sortFieldset('sentencing', ['מהעונש הקל לחמור', 'מהעונש החמור לקל']);
+  // A drug case also gets the fields of the drug-sentencing search on z-g.co.il, filled in from the document.
+  const priorFilters = prior?.sentencing?.filters ?? null;
+  const drugCase = isDrugCase(state.analysis) || Boolean(priorFilters && Object.keys(priorFilters).length);
+  let caseFilters = null;
+  const caseFiltersBox = h('div', {}, h('p', { class: 'small muted', text: 'טוען את שדות החיפוש בעבירות סמים…' }));
   const sentencingPanel = h('div', { class: 'setup-panel' },
     sentencingSort.el,
+    drugCase ? h('fieldset', { class: 'setup-fieldset' },
+      h('legend', { text: 'נתוני התיק (עבירות סמים)' }),
+      h('p', { class: 'question-help', text: priorFilters
+        ? 'השדות שנבחרו בשיחה זו. שדה ריק אינו מסנן.'
+        : 'השדות של חיפוש גזרי הדין בעבירות סמים. חלקם מולאו מתוך המסמך; אפשר לשנות או לנקות. שדה ריק אינו מסנן.' }),
+      caseFiltersBox) : null,
     h('fieldset', { class: 'setup-fieldset' },
       h('legend', { text: 'גזירת העונש' }),
       h('p', { class: 'question-help', text: '"הכל" משאיר את הנתון פתוח; "כן" או "לא" מצמצמים את התוצאות.' }),
@@ -1460,6 +1626,15 @@ function renderSearchSetup(q, { live, prior }) {
       h('div', { style: 'margin-top:6px' }, allSources)));
 
   loadSearchOptions().then((options) => {
+    if (drugCase) {
+      const fields = options.sentencingFields ?? [];
+      if (fields.length) {
+        caseFilters = renderCaseFilters(fields, { initial: priorFilters ?? (live ? filtersFromAnalysis(state.analysis, fields) : {}), live });
+        caseFiltersBox.replaceChildren(caseFilters.el);
+      } else {
+        caseFiltersBox.replaceChildren(h('p', { class: 'small', text: 'שדות החיפוש בעבירות סמים אינם זמינים כרגע. אפשר לחפש גם בלעדיהם.' }));
+      }
+    }
     flagsGrid.replaceChildren(...options.sentencingFlags.map((flag) => {
       const selectId = nextId('flag');
       const current = prior?.sentencing?.flags?.[flag.key];
@@ -1536,8 +1711,11 @@ function renderSearchSetup(q, { live, prior }) {
         flagText.push(`${label}: ${flags[key] ? 'כן' : 'לא'}`);
       }
       const sortDirection = sortOf(sentencingSort.sortName);
-      setup.sentencing = { flags, sort_direction: sortDirection };
-      summary.push(`גזרי דין (${order(sortDirection)})`, ...flagText);
+      const invalid = caseFilters?.invalid();
+      if (invalid) return invalid;
+      const filters = caseFilters?.values() ?? {};
+      setup.sentencing = { flags, ...(Object.keys(filters).length ? { filters } : {}), sort_direction: sortDirection };
+      summary.push(`גזרי דין (${order(sortDirection)})`, ...(caseFilters?.summary() ?? []), ...flagText);
     }
     if (arrangements.checked) {
       const punishments = [...punishmentBoxes].filter(([, box]) => box.checked).map(([value]) => value);

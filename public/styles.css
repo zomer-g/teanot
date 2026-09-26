@@ -180,7 +180,7 @@ body.app-page #root { flex: 1; min-height: 0; display: flex; flex-direction: col
 .thread:focus { outline: none; }
 .thread:focus-visible { outline: 3px solid var(--primary-dark); outline-offset: -3px; box-shadow: none; }
 .thread-inner { max-width: 1280px; margin: 0 auto; padding: 24px 20px 40px; }
-.welcome, .questions, .msg-user .msg-body { max-width: 860px; }
+.welcome, .msg-user .msg-body { max-width: 860px; }
 .welcome { margin-inline: auto; }
 .assistant-text > :not(.table-scroll) { max-width: 820px; }
 
@@ -320,6 +320,16 @@ body.app-page #root { flex: 1; min-height: 0; display: flex; flex-direction: col
 .setup-radio input, .setup-source input { width: 18px; height: 18px; margin: 0; flex-shrink: 0; accent-color: var(--primary); }
 .setup-flags { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px 14px; }
 .setup-flag .select { width: 100%; }
+.case-filters { display: grid; gap: 14px; }
+.case-group-title { margin: 0 0 6px; font-weight: 700; color: var(--primary-dark); }
+.case-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px 14px; align-items: start; }
+.case-field { min-width: 0; border: 0; margin: 0; padding: 0; }
+.case-field-wide { grid-column: 1 / -1; }
+.case-field > legend { padding: 0; margin-bottom: 4px; }
+.case-field .input, .case-field .select { width: 100%; }
+.case-range { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
+.case-range-part { display: grid; gap: 2px; flex: 1 1 90px; min-width: 0; }
+.case-range .select { flex: 1 1 120px; width: auto; }
 .setup-sources { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 2px 14px; }
 .questions-actions .btn { min-width: 120px; }
 

@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { query } from './db.js';
 import { recordTagitCall } from './usage.js';
 import * as tagit from './tagit.js';
+import { COURT_KEY, REPLACED_PARAMS } from './case-filters.js';
 
 const DRUG_SLUG_VALUES = Object.values(tagit.DRUG_SLUGS);
 const text = z.string().trim();
@@ -259,6 +260,13 @@ export function sentencingForModel(result, params, corpus = 'sentencing') {
 
 // The user's search setup wins over the model's parameters, so a choice made in the form cannot be dropped or
 // contradicted by the model. Model-set confessed/agreed_sentence give way to the same flag chosen by the user.
+// The user's setup as the model reads it: the clauses built from the drug-case fields are for TAG-IT only.
+const forModel = (chosen) => {
+  if (!chosen) return null;
+  const { clauses, ...rest } = chosen;
+  return rest;
+};
+
 export function withSentencingSetup(params, setup, corpus = 'sentencing') {
   const chosen = setup?.[corpus];
   if (corpus === 'arrangements') {
@@ -267,8 +275,17 @@ export function withSentencingSetup(params, setup, corpus = 'sentencing') {
   }
   if (!chosen) return params;
   const flags = { ...(params.flags ?? {}), ...chosen.flags };
+  // Drug-case fields chosen in the form replace the model's parameters for the same thing.
+  const replaced = {};
+  for (const key of Object.keys(chosen.filters ?? {})) {
+    for (const param of REPLACED_PARAMS[key] ?? []) replaced[param] = Array.isArray(params[param]) ? [] : null;
+  }
+  const court = chosen.filters?.[COURT_KEY];
   return {
     ...params,
+    ...replaced,
+    ...(court ? { court_instances: [court] } : {}),
+    setup_clauses: chosen.clauses ?? [],
     flags,
     confessed: 'meta.confessed' in flags ? null : params.confessed,
     agreed_sentence: 'meta.agreed_sentence' in flags ? null : params.agreed_sentence,
@@ -338,7 +355,7 @@ export async function executeTool(toolUse, ctx) {
         activity(label, 'done', { summary: result.total != null ? `${result.total} תוצאות` : `${result.items.length} תוצאות` });
         emit({ type: uiType, toolUseId: toolUse.id, data });
         return {
-          block: toolResult(toolUse, { ...sentencingForModel(result, params, corpus), applied_user_setup: ctx.searchSetup?.[corpus] ?? null }),
+          block: toolResult(toolUse, { ...sentencingForModel(result, params, corpus), applied_user_setup: forModel(ctx.searchSetup?.[corpus]) }),
           ui: { type: uiType, data },
         };
       } catch (err) {

@@ -1,8 +1,10 @@
-// What the search-setup form offers: the sentencing flags (read from a shared filter config, the drug-sentencing page
-// config on z-g.co.il by default), the guideline sources (from TAG-IT), and the stored per-conversation choice.
+// What the search-setup form offers: the sentencing flags and the drug-case fields (read from a shared filter config,
+// the drug-sentencing page config on z-g.co.il by default), the guideline sources (from TAG-IT), and the stored
+// per-conversation choice.
 import { z } from 'zod';
 import { query } from './db.js';
 import * as tagit from './tagit.js';
+import { FALLBACK_FIELDS, filterClauses, parseFields, sanitizeFilters } from './case-filters.js';
 
 const FILTER_CONFIG_URL = process.env.SENTENCING_FILTER_CONFIG_URL || process.env.ZG_FILTER_CONFIG_URL
   || 'https://www.z-g.co.il/api/rulings?category=drug-sentencing&meta=1';
@@ -24,11 +26,11 @@ const FALLBACK_FLAGS = [
   ['meta.community_service_imposed', 'הוטל מאסר בעבודות שירות'],
 ].map(([key, label]) => ({ key, label }));
 
-let flagsCache = { at: 0, flags: null, source: null };
+let flagsCache = { at: 0, flags: null, fields: null, source: null };
 
-// The remote config is another system's data: only boolean flags on plain meta.* keys that TAG-IT's schema knows
-// are accepted, so it can never inject another kind of filter.
-async function fetchConfigFlags() {
+// The remote config is another system's data: only boolean flags and the known field controls on plain meta.* keys
+// that TAG-IT's schema knows are accepted, so it can never inject another kind of filter.
+async function fetchConfig() {
   const res = await fetch(FILTER_CONFIG_URL, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15_000) });
   if (!res.ok) throw new Error(`filter config HTTP ${res.status}`);
   const body = await res.json();
@@ -39,17 +41,22 @@ async function fetchConfigFlags() {
     .filter((f) => f?.group === FLAG_GROUP && f.control === 'boolean' && FLAG_KEY_RE.test(f.key ?? '') && known.has(f.key))
     .map((f) => ({ key: f.key, label: String(f.label ?? f.key).slice(0, 80) }));
   if (!flags.length) throw new Error('filter config has no usable sentencing flags');
-  return flags;
+  return { flags, fields: parseFields(fields.filter((f) => f?.group !== FLAG_GROUP), known) };
 }
 
 export async function getSentencingFlags() {
   if (flagsCache.flags && Date.now() - flagsCache.at < TTL_MS) return flagsCache;
   try {
-    flagsCache = { at: Date.now(), flags: await fetchConfigFlags(), source: 'config' };
+    flagsCache = { at: Date.now(), ...await fetchConfig(), source: 'config' };
   } catch (err) {
     console.warn(`[search-options] sentencing flags from the filter config unavailable: ${err.message}`);
     // Keep the last good list; retry in five minutes rather than on every request.
-    flagsCache = { at: Date.now() - TTL_MS + 5 * 60 * 1000, flags: flagsCache.flags ?? FALLBACK_FLAGS, source: flagsCache.source ?? 'fallback' };
+    flagsCache = {
+      at: Date.now() - TTL_MS + 5 * 60 * 1000,
+      flags: flagsCache.flags ?? FALLBACK_FLAGS,
+      fields: flagsCache.fields ?? FALLBACK_FIELDS,
+      source: flagsCache.source ?? 'fallback',
+    };
   }
   return flagsCache;
 }
@@ -95,8 +102,18 @@ const arrangementsSetup = z.object({
   sort_direction: z.enum(['asc', 'desc']),
 }).strict();
 
+// A value of one drug-case field, in the shape of its control (checked against the offered fields on save).
+const filterValue = z.union([
+  z.string().max(200),
+  z.array(z.string().max(200)).max(60),
+  z.object({ min: z.number().nullable().optional(), max: z.number().nullable().optional(), unit: z.enum(['g', 'n']).optional() }).strict(),
+  z.object({ from: z.string().max(4).nullable().optional(), to: z.string().max(4).nullable().optional() }).strict(),
+]);
+
 const documentSetup = z.object({
   flags: z.record(z.string().regex(FLAG_KEY_RE), z.boolean()).refine((f) => Object.keys(f).length <= 30),
+  // Drug cases: the fields of the drug-sentencing search (drug, quantity, sections, punishment, court, years…).
+  filters: z.record(z.string().regex(FLAG_KEY_RE), filterValue).refine((f) => Object.keys(f).length <= 30).optional(),
   sort_direction: z.enum(['asc', 'desc']),
 }).strict();
 
@@ -126,12 +143,17 @@ export function normalizeSetup(setup) {
 
 // Keeps only flags the form currently offers, then stores the choice for the rest of the conversation.
 export async function saveSearchSetup(conversationId, setup) {
-  const { flags } = await getSentencingFlags();
+  const { flags, fields } = await getSentencingFlags();
   const offered = new Set(flags.map((f) => f.key));
-  const documents = (chosen) => ({
-    flags: Object.fromEntries(Object.entries(chosen?.flags ?? {}).filter(([key]) => offered.has(key))),
-    sort_direction: chosen?.sort_direction ?? 'asc',
-  });
+  const documents = (chosen) => {
+    const filters = sanitizeFilters(chosen?.filters, fields ?? []);
+    return {
+      flags: Object.fromEntries(Object.entries(chosen?.flags ?? {}).filter(([key]) => offered.has(key))),
+      // The clauses are built here, once, from the fields on offer; every search in the conversation reuses them.
+      ...(Object.keys(filters).length ? { filters, clauses: filterClauses(filters, fields) } : {}),
+      sort_direction: chosen?.sort_direction ?? 'asc',
+    };
+  };
   const kinds = setup.kinds ?? [];
   // An empty list means the catalogue could not be read, not that nothing is on offer: the choice is then kept
   // as the form sent it rather than silently dropped.

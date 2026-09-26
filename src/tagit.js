@@ -106,6 +106,17 @@ const FLAG_KEY_RE = /^meta\.[a-z0-9_]{1,60}$/;
 // ("text_query_filter_unsupported"). With a text query the clause is left out and applied to the results here.
 const courtInstanceIsUpstream = (p) => !p.text_query;
 
+// A clause stored with the user's search setup (built in case-filters.js): checked again before it is sent.
+const SETUP_CLAUSE_OPS = new Set(['eq', 'contains', 'in', 'ge', 'le']);
+function isSafeClause(clause, depth = 0) {
+  if (!clause || typeof clause !== 'object' || depth > 3) return false;
+  if (clause.op === 'and' || clause.op === 'or') {
+    return Array.isArray(clause.clauses) && clause.clauses.length > 0 && clause.clauses.length <= 20
+      && clause.clauses.every((c) => isSafeClause(c, depth + 1));
+  }
+  return FLAG_KEY_RE.test(clause.field ?? '') && SETUP_CLAUSE_OPS.has(clause.op);
+}
+
 export function buildSentencingFilter(p) {
   const clauses = [];
   for (const topic of p.topics ?? []) clauses.push({ field: 'meta.topics', op: 'contains', value: topic });
@@ -130,6 +141,8 @@ export function buildSentencingFilter(p) {
   for (const [key, value] of Object.entries(p.flags ?? {})) {
     if (FLAG_KEY_RE.test(key) && typeof value === 'boolean') clauses.push({ field: key, op: 'eq', value });
   }
+  // The drug-case fields chosen in the search setup, already built into clauses when the setup was saved.
+  for (const clause of p.setup_clauses ?? []) if (isSafeClause(clause)) clauses.push(clause);
   return clauses.length ? { op: 'and', clauses } : null;
 }
 
