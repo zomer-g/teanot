@@ -112,15 +112,20 @@ const filterValue = z.union([
 
 const documentSetup = z.object({
   flags: z.record(z.string().regex(FLAG_KEY_RE), z.boolean()).refine((f) => Object.keys(f).length <= 30),
-  // Drug cases: the fields of the drug-sentencing search (drug, quantity, sections, punishment, court, years…).
-  filters: z.record(z.string().regex(FLAG_KEY_RE), filterValue).refine((f) => Object.keys(f).length <= 30).optional(),
   sort_direction: z.enum(['asc', 'desc']),
+}).strict();
+
+// Drug cases: the fields of the drug-sentencing search (drug, quantity, sections, punishment, court, years…). They
+// narrow sentencing decisions, and those that describe the offence narrow conditional arrangements too.
+const caseSetup = z.object({
+  filters: z.record(z.string().regex(FLAG_KEY_RE), filterValue).refine((f) => Object.keys(f).length <= 30),
 }).strict();
 
 export const searchSetupSchema = z.object({
   kinds: z.array(z.enum(CORPUS_KINDS)).min(1).max(CORPUS_KINDS.length),
   sentencing: documentSetup.optional(),
   arrangements: arrangementsSetup.optional(),
+  case: caseSetup.optional(),
   guidelines: z.object({
     sources: z.array(z.string().trim().min(1).max(200)).max(50),
   }).strict().optional(),
@@ -129,6 +134,11 @@ export const searchSetupSchema = z.object({
 // Setups saved before conditional arrangements existed carry mode: sentencing | guidelines | both.
 export function normalizeSetup(setup) {
   if (!setup || typeof setup !== 'object') return null;
+  // The drug-case fields were briefly stored under sentencing, with their clauses as one list.
+  if (setup.sentencing?.filters) {
+    const { filters, clauses, ...rest } = setup.sentencing;
+    setup = { ...setup, sentencing: rest, case: { filters, clauses: Array.isArray(clauses) ? { all: clauses } : clauses } };
+  }
   // Arrangements were briefly stored with the sentencing flags, which do not apply to them.
   if (setup.arrangements?.flags) {
     const { flags, ...rest } = setup.arrangements;
@@ -145,15 +155,11 @@ export function normalizeSetup(setup) {
 export async function saveSearchSetup(conversationId, setup) {
   const { flags, fields } = await getSentencingFlags();
   const offered = new Set(flags.map((f) => f.key));
-  const documents = (chosen) => {
-    const filters = sanitizeFilters(chosen?.filters, fields ?? []);
-    return {
-      flags: Object.fromEntries(Object.entries(chosen?.flags ?? {}).filter(([key]) => offered.has(key))),
-      // The clauses are built here, once, from the fields on offer; every search in the conversation reuses them.
-      ...(Object.keys(filters).length ? { filters, clauses: filterClauses(filters, fields) } : {}),
-      sort_direction: chosen?.sort_direction ?? 'asc',
-    };
-  };
+  const documents = (chosen) => ({
+    flags: Object.fromEntries(Object.entries(chosen?.flags ?? {}).filter(([key]) => offered.has(key))),
+    sort_direction: chosen?.sort_direction ?? 'asc',
+  });
+  const filters = sanitizeFilters(setup.case?.filters, fields ?? []);
   const kinds = setup.kinds ?? [];
   // An empty list means the catalogue could not be read, not that nothing is on offer: the choice is then kept
   // as the form sent it rather than silently dropped.
@@ -168,6 +174,9 @@ export async function saveSearchSetup(conversationId, setup) {
     ...(kinds.includes('sentencing') ? { sentencing: documents(setup.sentencing) } : {}),
     ...(kinds.includes('arrangements') ? { arrangements: arrangements(setup.arrangements) } : {}),
     ...(kinds.includes('guidelines') ? { guidelines: { sources: [...new Set(setup.guidelines?.sources ?? [])] } } : {}),
+    // The clauses are built here, once, from the fields on offer; every search in the conversation reuses them.
+    ...(Object.keys(filters).length && (kinds.includes('sentencing') || kinds.includes('arrangements'))
+      ? { case: { filters, clauses: filterClauses(filters, fields) } } : {}),
   };
   await query('UPDATE conversations SET search_setup = $2::jsonb WHERE id = $1', [conversationId, JSON.stringify(clean)]);
   return clean;

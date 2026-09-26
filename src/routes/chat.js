@@ -337,7 +337,7 @@ chatRouter.post('/tagit/sentencing/more', requireActive, tagitLimit, async (req,
   });
   try {
     // The same user setup the first page was searched with, even if the browser sent older parameters.
-    const result = await tagit.searchSentencing(withSentencingSetup(parsed.data, await loadSearchSetup(conversation.id), corpus), { page, scope: tagit.corpusScope(corpus) });
+    const result = await tagit.searchSentencing(await withSentencingSetup(parsed.data, await loadSearchSetup(conversation.id), corpus), { page, scope: tagit.corpusScope(corpus) });
     await recordTagitCall({ account: req.account, conversationId: conversation.id, turnId, detail: { action, label: parsed.data.label, page, total: result.total, returned: result.items.length } });
     await finishTurn(turnId, 'completed');
     res.json({ page: result.page, total: result.total, items: result.items });

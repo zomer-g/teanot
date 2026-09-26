@@ -298,6 +298,9 @@ function renderApp() {
   });
   const sendBtn = h('button', { class: 'send-btn', type: 'button', 'aria-label': 'שליחה', svg: ICONS.send, onClick: () => (state.busy ? stopTurn() : send()) });
   const attachBtn = h('button', { class: 'attach-btn', type: 'button', 'aria-label': 'צירוף קובץ Word, PDF או טקסט', title: 'צירוף קובץ Word, PDF או טקסט', svg: ICONS.attach, onClick: () => fileInput.click() });
+  // Opens the search-setup form again in a follow-up, for what is easier to set in the form than to describe.
+  const setupBtn = h('button', { class: 'link-btn setup-reopen', type: 'button', hidden: true, onClick: () => openSearchForm() },
+    'פתיחת טופס החיפוש מחדש');
   const dropTarget = h('div', { class: 'drop-target' },
     attachment,
     h('div', { class: 'composer-row' }, attachBtn, textarea, sendBtn),
@@ -306,6 +309,7 @@ function renderApp() {
     h('div', { class: 'composer' },
       h('p', { id: hintId, class: 'sr-only', text: 'Enter שולח, Shift+Enter מוסיף שורה חדשה. קובץ מצרפים בכפתור הצירוף או בגרירה.' }),
       composerError,
+      h('div', { class: 'composer-tools' }, setupBtn),
       dropTarget,
       h('p', { class: 'composer-foot' },
         h('span', { class: 'foot-long', text: 'התוצאות מבוססות על מאגר TAG-IT ומיועדות לסיוע במחקר משפטי. יש לבדוק כל תוצאה מול המקור. ' }),
@@ -356,7 +360,7 @@ function renderApp() {
   syncSidebar();
 
   ui = {
-    sidebar, alertsBox, exportBar, newButton, conversationList, quota, thread, threadInner, textarea, sendBtn, attachBtn, attachment, fileInput, composerError,
+    sidebar, alertsBox, exportBar, setupBtn, newButton, conversationList, quota, thread, threadInner, textarea, sendBtn, attachBtn, attachment, fileInput, composerError,
     closeSidebar: () => setSidebar(false),
   };
   showWelcome();
@@ -404,6 +408,34 @@ function setBusy(busy) {
   ui.sendBtn.innerHTML = busy ? ICONS.stop : ICONS.send;
   ui.sendBtn.setAttribute('aria-label', busy ? 'עצירת העיבוד' : 'שליחה');
   ui.thread.setAttribute('aria-busy', String(busy));
+  syncSetupButton();
+}
+
+function syncSetupButton() {
+  if (!ui.setupBtn) return;
+  ui.setupBtn.hidden = !state.currentId;
+  ui.setupBtn.disabled = state.busy;
+}
+
+// The search-setup form, opened by the user in a follow-up. Its answer is sent as a message saying the setup
+// changed, together with the new setup, which the server stores and applies to every later search.
+function openSearchForm() {
+  if (!state.currentId || state.busy) return;
+  ui.threadInner.querySelectorAll('.setup-follow-up').forEach((el) => {
+    if (!el.querySelector('.questions.answered')) el.remove();
+  });
+  const section = renderQuestions({
+    intro: 'עדכון הגדרות החיפוש',
+    followUp: true,
+    questions: [{ id: 'mode', text: 'מה לחפש, ולפי אילו נתונים?', style: 'cards', multiple: false, allow_free_text: false, options: [] }],
+  }, true);
+  const wrap = h('div', { class: 'msg msg-assistant setup-follow-up' },
+    h('img', { class: 'msg-avatar', src: '/icon.svg', alt: '' }), h('div', { class: 'msg-body' }, section));
+  ui.threadInner.append(wrap);
+  // Scroll the thread only: scrolling the element into view would also move the page around the fixed layout.
+  ui.thread.scrollTop += wrap.getBoundingClientRect().top - ui.thread.getBoundingClientRect().top - 12;
+  section.querySelector('input, select')?.focus({ preventScroll: true });
+  announce('טופס החיפוש נפתח בסוף השיחה.');
 }
 
 // ---------- Sidebar ----------
@@ -487,6 +519,7 @@ function newConversation({ focusComposer = true } = {}) {
   if (state.controller) return;
   stopFollowing();
   state.currentId = null;
+  syncSetupButton();
   state.searchSetup = null;
   state.analysis = null;
   resetCitations();
@@ -508,6 +541,7 @@ async function openConversation(id, { focusThread = false } = {}) {
 
 function renderConversation({ conversation, turns, running, lastRequest }, { focusThread = false } = {}) {
   state.currentId = conversation.id;
+  syncSetupButton();
   state.searchSetup = conversation.search_setup ?? null;
   state.analysis = conversation.analysis ?? null;
   resetCitations();
@@ -651,7 +685,7 @@ function renderUserMessage({ text, fileName, pasted, answers }) {
 
 async function send({ answers = null, text: presetText = null } = {}) {
   if (state.busy) return;
-  const text = answers ? '' : (presetText ?? ui.textarea.value.trim());
+  const text = answers ? (presetText ?? '') : (presetText ?? ui.textarea.value.trim());
   const file = answers ? null : state.file;
   if (!text && !file && !answers) return;
   clearComposerError();
@@ -1100,6 +1134,7 @@ function renderResults(data, block, corpus = SENTENCING) {
     h('div', { class: 'results-head' },
       h('h3', { id: headingId, text: `${corpus.heading} · ${data.label}` }),
       h('p', { class: 'results-query', text: `${count} · ${data.params?.sort === 'date' ? 'מהחדש לישן' : `ממוינים ${corpus.order} ${data.params?.sort_direction === 'desc' ? 'החמור לקל' : 'הקל לחמור'}`}` })),
+    data.textQueryDropped ? h('p', { class: 'notice-box small', text: 'מאגר TAG-IT לא איפשר לשלב את חיפוש הטקסט עם המסננים, ולכן החיפוש רץ לפי המסננים בלבד. ייתכן שחלק מהתוצאות אינן קשורות לעבירה.' }) : null,
     items.length ? list : h('div', { class: 'notice-box', text: corpus.empty }),
     more);
 }
@@ -1580,19 +1615,21 @@ function renderSearchSetup(q, { live, prior }) {
   const flagSelects = new Map();
   const flagsGrid = h('div', { class: 'setup-flags' }, h('p', { class: 'small muted', text: 'טוען את נתוני גזירת העונש…' }));
   const sentencingSort = sortFieldset('sentencing', ['מהעונש הקל לחמור', 'מהעונש החמור לקל']);
-  // A drug case also gets the fields of the drug-sentencing search on z-g.co.il, filled in from the document.
-  const priorFilters = prior?.sentencing?.filters ?? null;
+  // A drug case also gets the fields of the drug-sentencing search on z-g.co.il, filled in from the document. They
+  // narrow sentencing decisions, and the ones describing the offence narrow conditional arrangements too.
+  const priorFilters = prior?.case?.filters ?? null;
   const drugCase = isDrugCase(state.analysis) || Boolean(priorFilters && Object.keys(priorFilters).length);
   let caseFilters = null;
   const caseFiltersBox = h('div', {}, h('p', { class: 'small muted', text: 'טוען את שדות החיפוש בעבירות סמים…' }));
+  const casePanel = drugCase ? h('div', { class: 'setup-panel' },
+    h('fieldset', { class: 'setup-fieldset' },
+      h('legend', { text: 'נתוני התיק (עבירות סמים)' }),
+      h('p', { class: 'question-help', text: `${priorFilters
+        ? 'השדות שנבחרו בשיחה זו.'
+        : 'השדות של חיפוש גזרי הדין בעבירות סמים. חלקם מולאו מתוך המסמך; אפשר לשנות או לנקות.'} שדה ריק אינו מסנן. הסם, הכמות והסעיפים חלים גם על ההסדרים המותנים.` }),
+      caseFiltersBox)) : null;
   const sentencingPanel = h('div', { class: 'setup-panel' },
     sentencingSort.el,
-    drugCase ? h('fieldset', { class: 'setup-fieldset' },
-      h('legend', { text: 'נתוני התיק (עבירות סמים)' }),
-      h('p', { class: 'question-help', text: priorFilters
-        ? 'השדות שנבחרו בשיחה זו. שדה ריק אינו מסנן.'
-        : 'השדות של חיפוש גזרי הדין בעבירות סמים. חלקם מולאו מתוך המסמך; אפשר לשנות או לנקות. שדה ריק אינו מסנן.' }),
-      caseFiltersBox) : null,
     h('fieldset', { class: 'setup-fieldset' },
       h('legend', { text: 'גזירת העונש' }),
       h('p', { class: 'question-help', text: '"הכל" משאיר את הנתון פתוח; "כן" או "לא" מצמצמים את התוצאות.' }),
@@ -1672,6 +1709,7 @@ function renderSearchSetup(q, { live, prior }) {
 
   const kindBoxes = [sentencing, arrangements, guidelines];
   const sync = () => {
+    if (casePanel) casePanel.hidden = !sentencing.checked && !arrangements.checked;
     sentencingPanel.hidden = !sentencing.checked;
     arrangementsPanel.hidden = !arrangements.checked;
     guidelinesPanel.hidden = !guidelines.checked;
@@ -1686,6 +1724,7 @@ function renderSearchSetup(q, { live, prior }) {
       kind(sentencing, 'גזרי דין', 'גזרי דין בעבירות דומות, עם סינון לפי נתוני גזירת העונש'),
       kind(arrangements, 'הסדרים מותנים', 'תיקים שנסגרו בהסדר מותנה, ללא הגשת כתב אישום'),
       kind(guidelines, 'הנחיות', 'הנחיות לפי הגוף שפרסם אותן')),
+    casePanel,
     sentencingPanel,
     arrangementsPanel,
     guidelinesPanel);
@@ -1696,11 +1735,20 @@ function renderSearchSetup(q, { live, prior }) {
     const kinds = [['sentencing', sentencing], ['arrangements', arrangements], ['guidelines', guidelines]]
       .filter(([, box]) => box.checked).map(([name]) => name);
     if (!kinds.length) return { error: 'יש לסמן לפחות סוג אחד של תוצאות: גזרי דין, הסדרים מותנים או הנחיות.', focus: sentencing };
+    const summary = [];
+    const setup = { kinds };
+    if (caseFilters && (sentencing.checked || arrangements.checked)) {
+      const invalid = caseFilters.invalid();
+      if (invalid) return invalid;
+      const filters = caseFilters.values();
+      if (Object.keys(filters).length) {
+        setup.case = { filters };
+        summary.push(...caseFilters.summary());
+      }
+    }
     const sources = [...sourceBoxes].filter(([, box]) => box.checked).map(([value]) => value);
     // Everything ticked is the same as no filter, and cheaper to search.
     const sourceFilter = sources.length === sourceBoxes.size ? [] : sources;
-    const setup = { kinds };
-    const summary = [];
     const order = (direction) => (direction === 'asc' ? 'מהקל לחמור' : 'מהחמור לקל');
     if (sentencing.checked) {
       const flags = {};
@@ -1711,11 +1759,8 @@ function renderSearchSetup(q, { live, prior }) {
         flagText.push(`${label}: ${flags[key] ? 'כן' : 'לא'}`);
       }
       const sortDirection = sortOf(sentencingSort.sortName);
-      const invalid = caseFilters?.invalid();
-      if (invalid) return invalid;
-      const filters = caseFilters?.values() ?? {};
-      setup.sentencing = { flags, ...(Object.keys(filters).length ? { filters } : {}), sort_direction: sortDirection };
-      summary.push(`גזרי דין (${order(sortDirection)})`, ...(caseFilters?.summary() ?? []), ...flagText);
+      setup.sentencing = { flags, sort_direction: sortDirection };
+      summary.push(`גזרי דין (${order(sortDirection)})`, ...flagText);
     }
     if (arrangements.checked) {
       const punishments = [...punishmentBoxes].filter(([, box]) => box.checked).map(([value]) => value);
@@ -1777,7 +1822,12 @@ function renderQuestions(data, live) {
     formError.hidden = true;
     ui.textarea.focus(); // the focused option is about to be disabled
     disableQuestions(section);
-    send({ answers });
+    if (data.followUp) {
+      // The new setup is shown with the answer and applied by the server; the text asks for the searches again.
+      send({ answers, text: 'עדכנתי את הגדרות החיפוש בטופס. הרץ מחדש את החיפושים לפי ההגדרות החדשות.' });
+    } else {
+      send({ answers });
+    }
   };
 
   const questionEls = data.questions.map((q) => {

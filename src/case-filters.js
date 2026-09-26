@@ -113,10 +113,12 @@ function drugQuantityClauses(drugs, range) {
   return perDrug.length === 1 ? [perDrug[0]] : [{ op: 'or', clauses: perDrug }];
 }
 
-// Clauses for sanitized filters. The court instance is left out: it goes through the search's court_instances,
-// which knows how to apply it together with a free-text query.
+// Clauses for sanitized filters, per field key, so a search can leave out the fields it replaces or that its corpus
+// lacks. The court instance is left out: it goes through the search's court_instances, which knows how to apply it
+// together with a free-text query. A per-drug quantity is filed under the quantity key.
 export function filterClauses(filters, fields) {
-  const clauses = [];
+  const byKey = {};
+  const add = (key, clause) => { (byKey[key] ??= []).push(clause); };
   const drugs = filters[DRUG_TYPES_KEY] ?? [];
   const quantity = filters[QUANTITY_KEY];
   const perDrug = drugs.length && quantity ? drugQuantityClauses(drugs, quantity) : null;
@@ -124,27 +126,41 @@ export function filterClauses(filters, fields) {
     const value = filters[field.key];
     if (value == null || field.key === COURT_KEY) continue;
     if (field.key === QUANTITY_KEY && perDrug) continue;
+    const key = field.key;
     if (field.control === 'text') {
-      clauses.push({ field: field.key, op: field.matchOp === 'eq' ? 'eq' : 'contains', value });
+      add(key, { field: key, op: field.matchOp === 'eq' ? 'eq' : 'contains', value });
     } else if (field.control === 'select') {
-      clauses.push({ field: field.key, op: field.matchOp === 'contains' ? 'contains' : 'eq', value });
+      add(key, { field: key, op: field.matchOp === 'contains' ? 'contains' : 'eq', value });
     } else if (field.control === 'multiselect') {
-      clauses.push({ field: field.key, op: 'in', value });
+      add(key, { field: key, op: 'in', value });
     } else if (field.control === 'number') {
-      if (value.min != null) clauses.push({ field: field.key, op: 'ge', value: value.min });
-      if (value.max != null) clauses.push({ field: field.key, op: 'le', value: value.max });
+      if (value.min != null) add(key, { field: key, op: 'ge', value: value.min });
+      if (value.max != null) add(key, { field: key, op: 'le', value: value.max });
     } else if (field.control === 'yearrange') {
-      if (value.from) clauses.push({ field: field.key, op: 'ge', value: `${value.from}-01-01` });
-      if (value.to) clauses.push({ field: field.key, op: 'le', value: `${value.to}-12-31` });
+      if (value.from) add(key, { field: key, op: 'ge', value: `${value.from}-01-01` });
+      if (value.to) add(key, { field: key, op: 'le', value: `${value.to}-12-31` });
     }
   }
-  if (perDrug) clauses.push(...perDrug);
-  return clauses;
+  if (perDrug) for (const clause of perDrug) add(QUANTITY_KEY, clause);
+  return byKey;
 }
+
+// Every field a clause (or a nested and/or of clauses) filters on.
+export function clauseFields(clause) {
+  if (clause?.op === 'and' || clause?.op === 'or') return (clause.clauses ?? []).flatMap(clauseFields);
+  return clause?.field ? [clause.field] : [];
+}
+
+// Fields of a drug case that describe the offence rather than the sentence, and so also narrow conditional
+// arrangements (when that corpus has the field).
+export const OFFENCE_KEYS = new Set([
+  'meta.drug_types', 'meta.drug_max_grams', 'meta.drug_ordinance_sections', 'meta.offense_laws', 'meta.offense_sections',
+  'meta.document_date',
+]);
 
 // The model's own parameters that a field chosen in the form replaces, so the two never contradict each other.
 export const REPLACED_PARAMS = {
-  'meta.drug_types': ['drug_types', 'drug_quantity'],
+  'meta.drug_types': ['drug_types'],
   'meta.drug_max_grams': ['drug_quantity'],
   'meta.drug_ordinance_sections': ['drug_ordinance_sections'],
   'meta.offense_sections': ['offense_sections'],

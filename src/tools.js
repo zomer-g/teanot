@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { query } from './db.js';
 import { recordTagitCall } from './usage.js';
 import * as tagit from './tagit.js';
-import { COURT_KEY, REPLACED_PARAMS } from './case-filters.js';
+import { COURT_KEY, OFFENCE_KEYS, REPLACED_PARAMS, clauseFields } from './case-filters.js';
 
 const DRUG_SLUG_VALUES = Object.values(tagit.DRUG_SLUGS);
 const text = z.string().trim();
@@ -106,6 +106,8 @@ export const sentencingParamsSchema = z.object({
     .describe('Yes/no sentencing flags as meta.* key → true/false. The user\'s search setup already sets these; add one only if the user asks for it in conversation'),
   sort: z.enum(['severity', 'prison', 'date']).default('severity'),
   sort_direction: z.enum(['asc', 'desc']).default('asc').describe('asc = most lenient first (default), desc = most severe first. The user\'s search setup overrides this'),
+  override_setup: z.boolean().default(false)
+    .describe('true only when the user asked in the conversation, after the search-setup form, for a different drug, quantity, section, court, date range or imprisonment range than the form set: your values for those parameters then replace the form\'s. Otherwise the form\'s values win'),
   size: z.number().int().min(1).max(50).default(30),
 });
 
@@ -228,6 +230,11 @@ export function sentencingForModel(result, params, corpus = 'sentencing') {
     // total_matches counts documents; one decision can have several copies, which are removed from items.
     duplicate_copies_removed: result.duplicatesRemoved || undefined,
     total_timed_out: result.timedOut || undefined,
+    // TAG-IT refused the free-text query together with these filters, so it was left out: nothing in these results
+    // is restricted by it.
+    text_query_dropped: result.textQueryDropped
+      ? 'TAG-IT refused text_query together with these filters, so the search ran on the filters alone and the results are NOT narrowed by the text. If they look unrelated to the offence, search again with structured filters (topics, drug_types, drug_quantity, offense_sections, drug_ordinance_sections) and without text_query, and tell the user.'
+      : undefined,
     page: result.page,
     returned: result.items.length,
     filter_sent: result.filter,
@@ -261,31 +268,78 @@ export function sentencingForModel(result, params, corpus = 'sentencing') {
 // The user's search setup wins over the model's parameters, so a choice made in the form cannot be dropped or
 // contradicted by the model. Model-set confessed/agreed_sentence give way to the same flag chosen by the user.
 // The user's setup as the model reads it: the clauses built from the drug-case fields are for TAG-IT only.
-const forModel = (chosen) => {
-  if (!chosen) return null;
-  const { clauses, ...rest } = chosen;
-  return rest;
+const forModel = (setup, corpus) => {
+  const chosen = setup?.[corpus] ?? null;
+  const filters = setup?.case?.filters;
+  if (!chosen && !filters) return null;
+  return { ...(chosen ?? {}), ...(filters ? { case_filters: filters } : {}) };
 };
 
-export function withSentencingSetup(params, setup, corpus = 'sentencing') {
-  const chosen = setup?.[corpus];
-  if (corpus === 'arrangements') {
-    const withTypes = chosen?.punishment_types?.length ? { ...params, punishment_types: chosen.punishment_types } : params;
-    return forArrangements(chosen?.sort_direction ? { ...withTypes, sort_direction: chosen.sort_direction } : withTypes);
+// Whether the model set a parameter at all (an empty list or null is "not set").
+const isSet = (value) => (Array.isArray(value) ? value.length > 0 : value != null);
+
+// The drug-case clauses of the setup for one search, per field key. When the model says the user asked for something
+// else in the conversation, the fields it sets itself are taken from its parameters instead of the form's.
+function caseClauses(params, setup) {
+  const byKey = setup?.case?.clauses ?? {};
+  const replacedByModel = new Set();
+  if (params.override_setup) {
+    for (const [key, names] of Object.entries(REPLACED_PARAMS)) {
+      if (names.some((name) => isSet(params[name]))) replacedByModel.add(key);
+    }
+    // A quantity from the model is for its own drug, so the form's drug types give way too.
+    if (isSet(params.drug_quantity)) replacedByModel.add('meta.drug_types');
   }
-  if (!chosen) return params;
-  const flags = { ...(params.flags ?? {}), ...chosen.flags };
-  // Drug-case fields chosen in the form replace the model's parameters for the same thing.
+  return Object.fromEntries(Object.entries(byKey).filter(([key]) => !replacedByModel.has(key)));
+}
+
+// The model's parameters that a field still applied from the form replaces, so the two never contradict each other.
+function withoutReplaced(params, keys) {
   const replaced = {};
-  for (const key of Object.keys(chosen.filters ?? {})) {
-    for (const param of REPLACED_PARAMS[key] ?? []) replaced[param] = Array.isArray(params[param]) ? [] : null;
+  for (const key of keys) {
+    for (const name of REPLACED_PARAMS[key] ?? []) replaced[name] = Array.isArray(params[name]) ? [] : null;
   }
-  const court = chosen.filters?.[COURT_KEY];
+  return { ...params, ...replaced };
+}
+
+let arrangementFields = { at: 0, keys: null };
+async function arrangementFieldKeys() {
+  if (arrangementFields.keys && Date.now() - arrangementFields.at < 60 * 60 * 1000) return arrangementFields.keys;
+  const schema = await tagit.getSentencingSchema({ scope: tagit.ARRANGEMENTS_SCOPE });
+  arrangementFields = { at: Date.now(), keys: new Set((schema.fields ?? []).map((f) => f.key)) };
+  return arrangementFields.keys;
+}
+
+export async function withSentencingSetup(params, setup, corpus = 'sentencing') {
+  const chosen = setup?.[corpus];
+  const clauses = caseClauses(params, setup);
+  if (corpus === 'arrangements') {
+    // The fields that describe the offence (drug, quantity, sections) narrow arrangements as well, when that corpus
+    // has them; the rest (court, punishment ranges) describe a sentence, which an arrangement does not have.
+    let known = null;
+    try { known = await arrangementFieldKeys(); } catch { /* without the catalogue, no drug-case field is applied */ }
+    const usable = Object.entries(clauses)
+      .filter(([key, list]) => OFFENCE_KEYS.has(key) && known && list.flatMap(clauseFields).every((f) => known.has(f)));
+    const base = withoutReplaced(params, usable.map(([key]) => key));
+    const withTypes = chosen?.punishment_types?.length ? { ...base, punishment_types: chosen.punishment_types } : base;
+    return forArrangements({
+      ...withTypes,
+      setup_clauses: usable.flatMap(([, list]) => list),
+      ...(chosen?.sort_direction ? { sort_direction: chosen.sort_direction } : {}),
+    });
+  }
+  const base = withoutReplaced(params, Object.keys(clauses));
+  const court = setup?.case?.filters?.[COURT_KEY];
+  const courtFromForm = court && !(params.override_setup && isSet(params.court_instances));
+  const withCase = {
+    ...base,
+    ...(courtFromForm ? { court_instances: [court] } : {}),
+    setup_clauses: Object.values(clauses).flat(),
+  };
+  if (!chosen) return withCase;
+  const flags = { ...(params.flags ?? {}), ...chosen.flags };
   return {
-    ...params,
-    ...replaced,
-    ...(court ? { court_instances: [court] } : {}),
-    setup_clauses: chosen.clauses ?? [],
+    ...withCase,
     flags,
     confessed: 'meta.confessed' in flags ? null : params.confessed,
     agreed_sentence: 'meta.agreed_sentence' in flags ? null : params.agreed_sentence,
@@ -342,7 +396,7 @@ export async function executeTool(toolUse, ctx) {
       const corpus = arrangements ? 'arrangements' : 'sentencing';
       const parsed = sentencingParamsSchema.safeParse(toolUse.input);
       if (!parsed.success) return validationError(toolUse, parsed.error.issues);
-      const params = withSentencingSetup(parsed.data, ctx.searchSetup, corpus);
+      const params = await withSentencingSetup(parsed.data, ctx.searchSetup, corpus);
       const noun = arrangements ? 'הסדרים מותנים' : 'גזרי דין';
       const label = `מחפש ${noun}: ${params.label}`;
       const action = arrangements ? 'search_arrangements' : 'search_sentencing';
@@ -351,11 +405,11 @@ export async function executeTool(toolUse, ctx) {
       try {
         const result = await tagit.searchSentencing(params, { signal, scope: tagit.corpusScope(corpus) });
         await recordTagitCall({ account, conversationId, turnId, detail: { action, label: params.label, filter: result.filter, sort: params.sort, sort_direction: params.sort_direction, text_query: params.text_query || undefined, total: result.total, returned: result.items.length } });
-        const data = { label: params.label, params, total: result.total, page: result.page, size: result.size, items: result.items, corpus };
+        const data = { label: params.label, params, total: result.total, page: result.page, size: result.size, items: result.items, corpus, textQueryDropped: result.textQueryDropped || undefined };
         activity(label, 'done', { summary: result.total != null ? `${result.total} תוצאות` : `${result.items.length} תוצאות` });
         emit({ type: uiType, toolUseId: toolUse.id, data });
         return {
-          block: toolResult(toolUse, { ...sentencingForModel(result, params, corpus), applied_user_setup: forModel(ctx.searchSetup?.[corpus]) }),
+          block: toolResult(toolUse, { ...sentencingForModel(result, params, corpus), applied_user_setup: forModel(ctx.searchSetup, corpus) }),
           ui: { type: uiType, data },
         };
       } catch (err) {
