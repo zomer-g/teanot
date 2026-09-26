@@ -81,6 +81,21 @@ const RELEVANCE_QUESTION = {
   },
 };
 
+// Guidelines are not cases to compare with: the question is whether the guideline governs the offences in the case.
+const GUIDELINE_QUESTION = {
+  relevance: {
+    type: 'score',
+    instructions: 'עורך דין פלילי מחפש הנחיות (של הפרקליטות, המשטרה או היועמ"ש) שחלות על תיק המקור. עד כמה ההנחיה רלוונטית לטיפול בעבירות שבתיק המקור, לענישה בהן או להחלטה אם להעמיד לדין? הנחיה בתחום אחר (למשל הגירה, תעבורה או נשק בתיק סמים) אינה רלוונטית.',
+    criteria: [
+      'לא רלוונטית: עוסקת בעבירות או בנושא אחר',
+      'רלוונטית בעקיפין: נושא כללי (סדרי דין, ענישה באופן כללי) שאינו ייחודי לעבירות שבתיק',
+      'רלוונטית: עוסקת באחת העבירות שבתיק או בתחום שלהן',
+      'רלוונטית מאוד: עוסקת ישירות בעבירות שבתיק ובנסיבות דומות',
+    ],
+  },
+};
+const questionFor = (corpus) => (corpus === 'guidelines' ? GUIDELINE_QUESTION : RELEVANCE_QUESTION);
+
 const clip = (text, max = MAX_TEXT) => {
   const s = String(text ?? '').replace(/\s+/g, ' ').trim();
   return s.length > max ? `${s.slice(0, max)}…` : s;
@@ -106,6 +121,15 @@ export function caseText(analysis) {
 }
 
 function resultText(item, corpus) {
+  if (corpus === 'guidelines') {
+    return [
+      `הנחיה: ${item.title ?? ''}`,
+      item.number ? `מספר: ${item.number}` : null,
+      item.source ? `מקור: ${item.source}` : null,
+      item.topic ? `נושא: ${item.topic}` : null,
+      item.summary ? `תקציר: ${clip(item.summary)}` : null,
+    ].filter(Boolean).join('\n');
+  }
   const drugs = (item.drugTotals ?? []).map((d) => [d.drug, d.amount, d.unit].filter((x) => x != null).join(' ')).join(', ');
   return [
     `${corpus === 'arrangements' ? 'הסדר מותנה' : 'גזר דין'}: ${item.title ?? ''}`,
@@ -137,7 +161,7 @@ export async function scoreItems(items, { caseDescription, searchLabel, corpus, 
   const scored = await mapLimited(items, CONCURRENCY, async (item) => {
     const state = `תיק המקור:\n${caseDescription}\n\nמה חיפשו: ${searchLabel ?? ''}\n\nתוצאת החיפוש:\n${resultText(item, corpus)}`;
     try {
-      const result = await runJev(state, RELEVANCE_QUESTION, { signal });
+      const result = await runJev(state, questionFor(corpus), { signal });
       inputTokens += result?.usage?.input_tokens ?? 0;
       const answer = result?.answers?.relevance;
       const score = Number(answer?.score);

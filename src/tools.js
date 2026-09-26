@@ -5,7 +5,7 @@ import { query } from './db.js';
 import { recordTagitCall } from './usage.js';
 import * as tagit from './tagit.js';
 import { applyRelevance } from './relevance.js';
-import { COURT_KEY, OFFENCE_KEYS, REPLACED_PARAMS, clauseFields } from './case-filters.js';
+import { ARRANGEMENT_KEYS, COURT_KEY, REPLACED_PARAMS, clauseFields } from './case-filters.js';
 
 const DRUG_SLUG_VALUES = Object.values(tagit.DRUG_SLUGS);
 const text = z.string().trim();
@@ -271,10 +271,10 @@ export function sentencingForModel(result, params, corpus = 'sentencing') {
 // contradicted by the model. Model-set confessed/agreed_sentence give way to the same flag chosen by the user.
 // The user's setup as the model reads it: the clauses built from the drug-case fields are for TAG-IT only.
 const forModel = (setup, corpus) => {
-  const chosen = setup?.[corpus] ?? null;
-  const filters = setup?.case?.filters;
-  if (!chosen && !filters) return null;
-  return { ...(chosen ?? {}), ...(filters ? { case_filters: filters } : {}) };
+  const chosen = setup?.[corpus];
+  if (!chosen) return null;
+  const { clauses, ...rest } = chosen;
+  return rest;
 };
 
 // What the result card needs to show relevance: the mode, the level the list opens at, and how many of the most
@@ -289,8 +289,8 @@ const isSet = (value) => (Array.isArray(value) ? value.length > 0 : value != nul
 
 // The drug-case clauses of the setup for one search, per field key. When the model says the user asked for something
 // else in the conversation, the fields it sets itself are taken from its parameters instead of the form's.
-function caseClauses(params, setup) {
-  const byKey = setup?.case?.clauses ?? {};
+function caseClauses(params, chosen) {
+  const byKey = chosen?.clauses ?? {};
   const replacedByModel = new Set();
   if (params.override_setup) {
     for (const [key, names] of Object.entries(REPLACED_PARAMS)) {
@@ -321,14 +321,14 @@ async function arrangementFieldKeys() {
 
 export async function withSentencingSetup(params, setup, corpus = 'sentencing') {
   const chosen = setup?.[corpus];
-  const clauses = caseClauses(params, setup);
+  const clauses = caseClauses(params, chosen);
   if (corpus === 'arrangements') {
     // The fields that describe the offence (drug, quantity, sections) narrow arrangements as well, when that corpus
     // has them; the rest (court, punishment ranges) describe a sentence, which an arrangement does not have.
     let known = null;
     try { known = await arrangementFieldKeys(); } catch { /* without the catalogue, no drug-case field is applied */ }
     const usable = Object.entries(clauses)
-      .filter(([key, list]) => OFFENCE_KEYS.has(key) && known && list.flatMap(clauseFields).every((f) => known.has(f)));
+      .filter(([key, list]) => ARRANGEMENT_KEYS.has(key) && known && list.flatMap(clauseFields).every((f) => known.has(f)));
     const base = withoutReplaced(params, usable.map(([key]) => key));
     const withTypes = chosen?.punishment_types?.length ? { ...base, punishment_types: chosen.punishment_types } : base;
     return forArrangements({
@@ -338,7 +338,7 @@ export async function withSentencingSetup(params, setup, corpus = 'sentencing') 
     });
   }
   const base = withoutReplaced(params, Object.keys(clauses));
-  const court = setup?.case?.filters?.[COURT_KEY];
+  const court = chosen?.filters?.[COURT_KEY];
   const courtFromForm = court && !(params.override_setup && isSet(params.court_instances));
   const withCase = {
     ...base,
@@ -412,7 +412,14 @@ export async function executeTool(toolUse, ctx) {
       const uiType = arrangements ? 'arrangements' : 'results';
       activity(label, 'running');
       try {
-        const found = await tagit.searchSentencing(params, { signal, scope: tagit.corpusScope(corpus) });
+        let found = await tagit.searchSentencing(params, { signal, scope: tagit.corpusScope(corpus) });
+        // The case fields come from the sentencing catalogue; in the arrangements one they can match nothing. Then
+        // the arrangements are searched without them, and relevance scoring sorts out what is related.
+        let caseFieldsDropped = false;
+        if (arrangements && !found.items.length && params.setup_clauses?.length) {
+          found = await tagit.searchSentencing({ ...params, setup_clauses: [] }, { signal, scope: tagit.corpusScope(corpus) });
+          caseFieldsDropped = found.items.length > 0;
+        }
         await recordTagitCall({ account, conversationId, turnId, detail: { action, label: params.label, filter: found.filter, sort: params.sort, sort_direction: params.sort_direction, text_query: params.text_query || undefined, total: found.total, returned: found.items.length } });
         // Each result scored for relevance to the case (when the admin turned it on); under the threshold, hidden.
         const relevance = await applyRelevance(found, { account, conversationId, turnId, corpus, label: params.label, signal });
@@ -421,6 +428,7 @@ export async function executeTool(toolUse, ctx) {
         const data = {
           label: params.label, params, total: found.total, page: found.page, size: found.size, items: relevance.items, corpus,
           textQueryDropped: found.textQueryDropped || undefined,
+          caseFieldsDropped: caseFieldsDropped || undefined,
           ...relevanceUi(relevance),
         };
         activity(label, 'done', { summary: result.total != null ? `${result.total} תוצאות` : `${result.items.length} תוצאות` });
@@ -428,6 +436,9 @@ export async function executeTool(toolUse, ctx) {
         return {
           block: toolResult(toolUse, {
             ...sentencingForModel(result, params, corpus),
+            case_fields_dropped: caseFieldsDropped
+              ? 'No arrangement matched the drug/section fields from the search form, so arrangements were searched without them.'
+              : undefined,
             less_relevant_not_listed: relevance.items.length > relevance.shown.length
               ? `${relevance.items.length - relevance.shown.length} results on this page scored as less relevant to the case; the user sees them only after expanding the list, and they are not in items.`
               : undefined,
@@ -452,7 +463,10 @@ export async function executeTool(toolUse, ctx) {
       try {
         const result = await tagit.searchGuidelines(params, { signal });
         await recordTagitCall({ account, conversationId, turnId, detail: { action: 'search_guidelines', label: params.label, queries: params.queries, sources: params.sources?.length ? params.sources : undefined, topic: params.topic || undefined, returned: result.items.length } });
-        const data = { label: params.label, params, totals: result.totals, items: result.items };
+        // Guidelines are matched as substrings, so a search catches unrelated directives too: each one is scored for
+        // relevance to the case like the decisions, and the model reads the ones the list opens with.
+        const relevance = await applyRelevance(result, { account, conversationId, turnId, corpus: 'guidelines', label: params.label, signal });
+        const data = { label: params.label, params, totals: result.totals, items: relevance.items, ...relevanceUi(relevance) };
         activity(label, 'done', { summary: `${result.items.length} הנחיות` });
         emit({ type: 'guidelines', toolUseId: toolUse.id, data });
         return {
@@ -460,10 +474,13 @@ export async function executeTool(toolUse, ctx) {
             label: params.label,
             totals: result.totals,
             sources_filter: result.sources,
-            items: result.items.map((g) => ({
+            items: relevance.shown.map((g) => ({
               ref: `guideline:${g.id}`, title: g.title, number: g.number, source: g.source, topic: g.topic, date: g.date,
-              matched_queries: g.matchedQueries, summary: truncate(g.summary, 400),
+              matched_queries: g.matchedQueries, summary: truncate(g.summary, 400), relevance: g.relevance?.score ?? undefined,
             })),
+            less_relevant_not_listed: relevance.items.length > relevance.shown.length
+              ? `${relevance.items.length - relevance.shown.length} guidelines scored as less relevant to the case; the user sees them only after expanding the list, and they are not in items.`
+              : undefined,
           }),
           ui: { type: 'guidelines', data },
         };

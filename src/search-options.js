@@ -4,7 +4,7 @@
 import { z } from 'zod';
 import { query } from './db.js';
 import * as tagit from './tagit.js';
-import { FALLBACK_FIELDS, filterClauses, parseFields, sanitizeFilters } from './case-filters.js';
+import { ARRANGEMENT_KEYS, FALLBACK_FIELDS, filterClauses, parseFields, sanitizeFilters } from './case-filters.js';
 
 const FILTER_CONFIG_URL = process.env.SENTENCING_FILTER_CONFIG_URL || process.env.ZG_FILTER_CONFIG_URL
   || 'https://www.z-g.co.il/api/rulings?category=drug-sentencing&meta=1';
@@ -97,11 +97,6 @@ export async function getGuidelineSources() {
 export const CORPUS_KINDS = ['sentencing', 'guidelines', 'arrangements'];
 
 // The arrangements corpus is filtered by what an arrangement actually contains: the kind of punishment agreed.
-const arrangementsSetup = z.object({
-  punishment_types: z.array(z.string().trim().min(1).max(60)).max(10),
-  sort_direction: z.enum(['asc', 'desc']),
-}).strict();
-
 // A value of one drug-case field, in the shape of its control (checked against the offered fields on save).
 const filterValue = z.union([
   z.string().max(200),
@@ -110,22 +105,26 @@ const filterValue = z.union([
   z.object({ from: z.string().max(4).nullable().optional(), to: z.string().max(4).nullable().optional() }).strict(),
 ]);
 
+// Drug cases: the fields of the drug-sentencing search (drug, quantity, sections, punishment, court, years…), each
+// corpus with its own choice.
+const caseFilters = z.record(z.string().regex(FLAG_KEY_RE), filterValue).refine((f) => Object.keys(f).length <= 30);
+
 const documentSetup = z.object({
   flags: z.record(z.string().regex(FLAG_KEY_RE), z.boolean()).refine((f) => Object.keys(f).length <= 30),
   sort_direction: z.enum(['asc', 'desc']),
+  filters: caseFilters.optional(),
 }).strict();
 
-// Drug cases: the fields of the drug-sentencing search (drug, quantity, sections, punishment, court, years…). They
-// narrow sentencing decisions, and those that describe the offence narrow conditional arrangements too.
-const caseSetup = z.object({
-  filters: z.record(z.string().regex(FLAG_KEY_RE), filterValue).refine((f) => Object.keys(f).length <= 30),
+const arrangementsSetup = z.object({
+  punishment_types: z.array(z.string().trim().min(1).max(60)).max(10),
+  sort_direction: z.enum(['asc', 'desc']),
+  filters: caseFilters.optional(),
 }).strict();
 
 export const searchSetupSchema = z.object({
   kinds: z.array(z.enum(CORPUS_KINDS)).min(1).max(CORPUS_KINDS.length),
   sentencing: documentSetup.optional(),
   arrangements: arrangementsSetup.optional(),
-  case: caseSetup.optional(),
   guidelines: z.object({
     sources: z.array(z.string().trim().min(1).max(200)).max(50),
   }).strict().optional(),
@@ -134,10 +133,16 @@ export const searchSetupSchema = z.object({
 // Setups saved before conditional arrangements existed carry mode: sentencing | guidelines | both.
 export function normalizeSetup(setup) {
   if (!setup || typeof setup !== 'object') return null;
-  // The drug-case fields were briefly stored under sentencing, with their clauses as one list.
-  if (setup.sentencing?.filters) {
-    const { filters, clauses, ...rest } = setup.sentencing;
-    setup = { ...setup, sentencing: rest, case: { filters, clauses: Array.isArray(clauses) ? { all: clauses } : clauses } };
+  // The drug-case fields were briefly stored with their clauses as one list, then shared by both corpora as `case`.
+  if (Array.isArray(setup.sentencing?.clauses)) setup = { ...setup, sentencing: { ...setup.sentencing, clauses: { all: setup.sentencing.clauses } } };
+  if (setup.case) {
+    const { case: shared, ...rest } = setup;
+    const only = (obj, keys) => Object.fromEntries(Object.entries(obj ?? {}).filter(([key]) => keys.has(key)));
+    setup = {
+      ...rest,
+      ...(rest.sentencing ? { sentencing: { ...rest.sentencing, filters: shared.filters, clauses: shared.clauses } } : {}),
+      ...(rest.arrangements ? { arrangements: { ...rest.arrangements, filters: only(shared.filters, ARRANGEMENT_KEYS), clauses: only(shared.clauses, ARRANGEMENT_KEYS) } } : {}),
+    };
   }
   // Arrangements were briefly stored with the sentencing flags, which do not apply to them.
   if (setup.arrangements?.flags) {
@@ -155,11 +160,17 @@ export function normalizeSetup(setup) {
 export async function saveSearchSetup(conversationId, setup) {
   const { flags, fields } = await getSentencingFlags();
   const offered = new Set(flags.map((f) => f.key));
+  // The case fields, with their clauses built here, once, from the fields on offer; every search in the conversation
+  // reuses them.
+  const withCase = (chosen, offeredFields) => {
+    const filters = sanitizeFilters(chosen?.filters, offeredFields);
+    return Object.keys(filters).length ? { filters, clauses: filterClauses(filters, offeredFields) } : {};
+  };
   const documents = (chosen) => ({
     flags: Object.fromEntries(Object.entries(chosen?.flags ?? {}).filter(([key]) => offered.has(key))),
     sort_direction: chosen?.sort_direction ?? 'asc',
+    ...withCase(chosen, fields ?? []),
   });
-  const filters = sanitizeFilters(setup.case?.filters, fields ?? []);
   const kinds = setup.kinds ?? [];
   // An empty list means the catalogue could not be read, not that nothing is on offer: the choice is then kept
   // as the form sent it rather than silently dropped.
@@ -168,15 +179,13 @@ export async function saveSearchSetup(conversationId, setup) {
     punishment_types: [...new Set(chosen?.punishment_types ?? [])]
       .filter((value) => !offeredPunishments.size || offeredPunishments.has(value)),
     sort_direction: chosen?.sort_direction ?? 'asc',
+    ...withCase(chosen, (fields ?? []).filter((f) => ARRANGEMENT_KEYS.has(f.key))),
   });
   const clean = {
     kinds,
     ...(kinds.includes('sentencing') ? { sentencing: documents(setup.sentencing) } : {}),
     ...(kinds.includes('arrangements') ? { arrangements: arrangements(setup.arrangements) } : {}),
     ...(kinds.includes('guidelines') ? { guidelines: { sources: [...new Set(setup.guidelines?.sources ?? [])] } } : {}),
-    // The clauses are built here, once, from the fields on offer; every search in the conversation reuses them.
-    ...(Object.keys(filters).length && (kinds.includes('sentencing') || kinds.includes('arrangements'))
-      ? { case: { filters, clauses: filterClauses(filters, fields) } } : {}),
   };
   await query('UPDATE conversations SET search_setup = $2::jsonb WHERE id = $1', [conversationId, JSON.stringify(clean)]);
   return clean;

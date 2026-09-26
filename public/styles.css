@@ -302,7 +302,7 @@ body.app-page #root { flex: 1; min-height: 0; display: flex; flex-direction: col
 
 /* Search setup (the "mode" question) */
 .search-setup { margin-bottom: 8px; }
-.setup-kinds { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 6px 0 12px; }
+.setup-kinds { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 6px 0 14px; }
 .setup-kind {
   display: flex; align-items: flex-start; gap: 10px; cursor: pointer; background: #fff;
   border: 1px solid var(--border-control); border-radius: var(--radius-xl); padding: 12px 14px; transition: border-color .2s, box-shadow .2s;
@@ -313,6 +313,19 @@ body.app-page #root { flex: 1; min-height: 0; display: flex; flex-direction: col
 .setup-kind-text strong { display: block; font-size: 16px; color: var(--primary-dark); }
 .setup-kind-text span { font-size: 13px; color: var(--muted); }
 .setup-panel { border-inline-start: 3px solid var(--accent); padding-inline-start: 12px; margin: 4px 0 12px; }
+/* One card per corpus, each with its own fields. */
+.setup-panels { display: grid; gap: 12px; }
+.setup-card { border: 1px solid var(--border); border-inline-start: 4px solid var(--primary); border-radius: var(--radius-lg); background: #fff; padding: 12px 16px 6px; margin: 0; }
+.setup-card-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 8px; }
+.setup-card-head h4 { margin: 0; font-size: 17px; color: var(--primary-dark); }
+.setup-card-head p { margin: 0; }
+.setup-block { margin: 0 0 10px; }
+.setup-block-title { margin: 0 0 2px; font-weight: 600; font-size: 15px; color: var(--primary-dark); }
+.setup-fold { border-top: 1px solid var(--border); padding: 6px 0; }
+.setup-fold > summary { cursor: pointer; font-weight: 600; font-size: 14.5px; color: var(--primary); padding: 4px 0; list-style-position: inside; }
+.setup-fold > summary:hover { color: var(--primary-dark); text-decoration: underline; }
+.setup-fold-body { padding: 6px 0 4px; }
+.setup-card .case-filters { gap: 6px; }
 .setup-fieldset { border: 0; margin: 0 0 12px; padding: 0; min-width: 0; }
 .setup-fieldset legend { font-weight: 600; font-size: 15px; color: var(--primary-dark); padding: 0; margin-bottom: 6px; }
 .setup-radios { display: flex; flex-wrap: wrap; gap: 8px 18px; }

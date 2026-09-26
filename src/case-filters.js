@@ -151,12 +151,9 @@ export function clauseFields(clause) {
   return clause?.field ? [clause.field] : [];
 }
 
-// Fields of a drug case that describe the offence rather than the sentence, and so also narrow conditional
-// arrangements (when that corpus has the field).
-export const OFFENCE_KEYS = new Set([
-  'meta.drug_types', 'meta.drug_max_grams', 'meta.drug_ordinance_sections', 'meta.offense_laws', 'meta.offense_sections',
-  'meta.document_date',
-]);
+// The fields the search form offers for conditional arrangements: the drug, the quantity and the Dangerous Drugs
+// Ordinance sections. The rest (court, punishment ranges, years) describe a sentence, which an arrangement lacks.
+export const ARRANGEMENT_KEYS = new Set(['meta.drug_types', 'meta.drug_max_grams', 'meta.drug_ordinance_sections']);
 
 // The model's own parameters that a field chosen in the form replaces, so the two never contradict each other.
 export const REPLACED_PARAMS = {

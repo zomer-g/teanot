@@ -211,7 +211,7 @@ chatRouter.post('/chat', requireActive, rateLimit({ name: 'chat', limit: 30, win
   if (setupUpdated) {
     userBlocks.push({
       type: 'text',
-      text: `[Note from the app, not typed by the user] The user reopened the search-setup form and saved this setup, which now applies automatically to every search: ${JSON.stringify(savedSetup.case ? { ...savedSetup, case: { filters: savedSetup.case.filters } } : savedSetup)}. Run the searches again now, one per corpus in "kinds" (sentencing → search_sentencing_decisions, arrangements → search_conditional_arrangements, guidelines → search_guidelines), with parameters that fit the case, then summarize what changed.`,
+      text: `[Note from the app, not typed by the user] The user reopened the search-setup form and saved this setup, which now applies automatically to every search: ${JSON.stringify(savedSetup, (key, value) => (key === 'clauses' ? undefined : value))}. Run the searches again now, one per corpus in "kinds" (sentencing → search_sentencing_decisions, arrangements → search_conditional_arrangements, guidelines → search_guidelines), with parameters that fit the case, then summarize what changed.`,
     });
   }
 
@@ -347,7 +347,13 @@ chatRouter.post('/tagit/sentencing/more', requireActive, tagitLimit, async (req,
   });
   try {
     // The same user setup the first page was searched with, even if the browser sent older parameters.
-    const result = await tagit.searchSentencing(await withSentencingSetup(parsed.data, await loadSearchSetup(conversation.id), corpus), { page, scope: tagit.corpusScope(corpus) });
+    const params = await withSentencingSetup(parsed.data, await loadSearchSetup(conversation.id), corpus);
+    let result = await tagit.searchSentencing(params, { page, scope: tagit.corpusScope(corpus) });
+    // As on the first page: arrangements that match none of the case fields at all were searched without them.
+    if (corpus === 'arrangements' && !result.items.length && params.setup_clauses?.length) {
+      const probe = await tagit.searchSentencing({ ...params, size: 1 }, { page: 1, scope: tagit.corpusScope(corpus) });
+      if (!probe.items.length) result = await tagit.searchSentencing({ ...params, setup_clauses: [] }, { page, scope: tagit.corpusScope(corpus) });
+    }
     await recordTagitCall({ account: req.account, conversationId: conversation.id, turnId, detail: { action, label: parsed.data.label, page, total: result.total, returned: result.items.length } });
     const relevance = await applyRelevance(result, { account: req.account, conversationId: conversation.id, turnId, corpus, label: parsed.data.label });
     await finishTurn(turnId, 'completed');
