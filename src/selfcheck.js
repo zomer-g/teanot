@@ -1,6 +1,7 @@
 // Boot-time diagnostics written to the runtime log (never secret values): are the language model and TAG-IT
 // reachable with the configured keys, and does TAG-IT's live schema carry the fields the tools filter on?
 import * as tagit from './tagit.js';
+import { getArrangementPunishments } from './search-options.js';
 import { probePdfExtraction } from './extract.js';
 import { activeModel, keyStatus, streamModel } from './llm/index.js';
 import { clearProviderAlert, recordProviderFailure } from './llm/alerts.js';
@@ -13,6 +14,31 @@ const EXPECTED_FIELDS = [
 ];
 
 const errorInfo = (err) => ({ ok: false, status: err.status ?? null, error: String(err.message).slice(0, 300) });
+
+// The text and file endpoints take a document id and no scope. read_document, the result cards and the exports
+// with the original document all rely on them, so a few documents of each corpus are tried here.
+async function sampleDocuments(items, count = 3) {
+  const out = [];
+  for (const item of items.slice(0, count)) {
+    const sample = { id: item.id };
+    try {
+      const doc = await tagit.readRulingText(item.id);
+      sample.textChars = (doc.text ?? '').length;
+    } catch (err) {
+      sample.textError = String(err.message).slice(0, 160);
+    }
+    try {
+      const res = await tagit.fetchFile('ruling', item.id);
+      sample.fileStatus = res.status;
+      sample.fileType = res.headers.get('content-type');
+      await res.body?.cancel?.();
+    } catch (err) {
+      sample.fileError = String(err.message).slice(0, 160);
+    }
+    out.push(sample);
+  }
+  return out;
+}
 
 async function timed(fn) {
   const started = Date.now();
@@ -99,6 +125,7 @@ export async function runSelfCheck() {
           hasTitle: Boolean(first.title), prisonMonths: first.prisonMonths, severity: first.severity,
           drugTotals: first.drugTotals.length, defendants: first.defendants.length, hasSummary: Boolean(first.summary),
         } : null,
+        documents: await sampleDocuments(result.items),
       };
     } catch (err) {
       return errorInfo(err);
@@ -109,6 +136,34 @@ export async function runSelfCheck() {
     try {
       const result = await tagit.searchGuidelines({ queries: ['סמים'], limit: 3 });
       return { ok: true, keySource: tagit.guidelinesKeySource(), totals: result.totals, returned: result.items.length };
+    } catch (err) {
+      return errorInfo(err);
+    }
+  });
+
+  // The conditional-arrangements corpus: same client, another scope.
+  report.tagitArrangements = await timed(async () => {
+    try {
+      const scope = tagit.ARRANGEMENTS_SCOPE;
+      const schema = await tagit.getSentencingSchema({ scope });
+      const result = await tagit.searchSentencing({ label: 'selfcheck', sort: 'date', size: 5 }, { scope });
+      const first = result.items[0];
+      return {
+        ok: true,
+        scope,
+        scopeName: schema.scope_name ?? null,
+        fieldCount: (schema.fields ?? []).length,
+        total: result.total,
+        returned: result.items.length,
+        firstItem: first ? {
+          id: first.id, hasTitle: Boolean(first.title), date: first.date, severity: first.severity,
+          fine: first.fine, compensation: first.compensation, defendants: first.defendants.length,
+          hasSummary: Boolean(first.summary),
+        } : null,
+        documents: await sampleDocuments(result.items),
+        // The punishments the search-setup form offers for this corpus, as derived from the live catalogue.
+        punishments: await getArrangementPunishments(),
+      };
     } catch (err) {
       return errorInfo(err);
     }

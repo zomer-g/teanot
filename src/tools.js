@@ -54,7 +54,7 @@ export const analysisSchema = z.object({
     name: optText,
     counts: z.array(countSchema).default([]),
   })).default([]),
-  requested_mode: z.enum(['sentencing', 'guidelines', 'both', 'unspecified']).default('unspecified')
+  requested_mode: z.enum(['sentencing', 'guidelines', 'arrangements', 'both', 'unspecified']).default('unspecified')
     .describe('The result type the user already asked for in their message, if any'),
 });
 
@@ -88,6 +88,8 @@ export const sentencingParamsSchema = z.object({
     min: z.number().min(0).nullable().optional(),
     max: z.number().min(0).nullable().optional(),
   }).nullable().optional().describe('Case-level TOTAL quantity range for one drug (summed across all defendants in the case)'),
+  punishment_types: z.array(text).max(10).default([])
+    .describe('meta.punishment_types values, ANY of. In conditional arrangements: התחייבות, פיצוי, קנס, שירות לתועלת הציבור, שלילה'),
   offense_sections: z.array(text).max(20).default([]).describe('meta.offense_sections tokens, ANY of; full "144(א)" or bare "144"'),
   offense_law_sections: z.array(text).max(20).default([]).describe('meta.offense_law_sections "law§section" pairs, ANY of'),
   drug_ordinance_sections: z.array(text).max(20).default([]).describe('meta.drug_ordinance_sections (Dangerous Drugs Ordinance), ANY of, e.g. ["7", "13", "19א"]'),
@@ -125,13 +127,15 @@ export const guidelinesParamsSchema = z.object({
 const GUIDELINE_FACETS = { 'guidelines.topic': 'topics', 'guidelines.source': 'sources' };
 
 const fieldValuesSchema = z.object({
-  field: text.describe('A meta.* field key for sentencing decisions, e.g. "meta.topics", "meta.offense_laws", "meta.offense_law_sections"; or "guidelines.topic" / "guidelines.source" for the guideline fields'),
+  field: text.describe('A meta.* field key, e.g. "meta.topics", "meta.offense_laws", "meta.offense_law_sections"; or "guidelines.topic" / "guidelines.source" for the guideline fields'),
+  corpus: z.enum(['sentencing', 'arrangements']).default('sentencing')
+    .describe('Which catalogue the meta.* field belongs to: sentencing decisions, or conditional arrangements. The stored values differ between them'),
   contains: optText.describe('Only return values containing this substring'),
 });
 
 const readDocumentSchema = z.object({
-  kind: z.enum(['ruling', 'guideline']),
-  id: z.number().int().describe('The number after "ruling:" or "guideline:" in the ref'),
+  kind: z.enum(['ruling', 'arrangement', 'guideline']),
+  id: z.number().int().describe('The number after "ruling:", "arrangement:" or "guideline:" in the ref'),
   max_chars: z.number().int().min(2000).max(80000).default(40000),
 });
 
@@ -151,12 +155,17 @@ export const TOOLS = [
   },
   {
     name: 'ask_user',
-    description: 'Show the user 1–4 focused questions with clickable options and end your turn. The answers arrive as this tool\'s result on the next turn (or the user may type a free message instead). Use it to choose the result type (question id "mode", style "cards": sentencing / guidelines / both), the defendant, or to narrow a search with concrete options such as quantity ranges. Mark the default you would pick as recommended.',
+    description: 'Show the user 1–4 focused questions with clickable options and end your turn. The answers arrive as this tool\'s result on the next turn (or the user may type a free message instead). Use it to choose the result type (question id "mode", style "cards": sentencing / guidelines / arrangements / both), the defendant, or to narrow a search with concrete options such as quantity ranges. Mark the default you would pick as recommended.',
     input_schema: inputSchema(askUserSchema),
   },
   {
     name: 'search_sentencing_decisions',
     description: 'Search criminal sentencing decisions (גזרי דין) in TAG-IT. All filters are combined with AND. Results are shown to the user as cards, most severe first; you receive a compact list with imprisonment statistics. Quantity and punishment fields are case-level: quantities are summed across all defendants, and imprisonment is the most severe defendant\'s. Returns total matches so you can judge whether to narrow or broaden.',
+    input_schema: inputSchema(sentencingParamsSchema),
+  },
+  {
+    name: 'search_conditional_arrangements',
+    description: 'Search conditional arrangements (הסדרים מותנים) in TAG-IT: cases closed by the police or the State Attorney without an indictment, in exchange for conditions. The corpus is catalogued exactly like sentencing decisions, so this tool takes the same filters (topics, offence sections, flags such as confessed, date range) and returns the same shape. Its punishments are fines, compensation, community service and undertakings rather than imprisonment: filter them with punishment_types (התחייבות, פיצוי, קנס, שירות לתועלת הציבור, שלילה). The corpus holds no imprisonment, criminal record, sentencing range or court instance, so those filters and the yes/no flags are ignored here. Use it when the user asks what happens in arrangements for an offence, or to compare an indictment with cases that were closed in an arrangement.',
     input_schema: inputSchema(sentencingParamsSchema),
   },
   {
@@ -166,12 +175,12 @@ export const TOOLS = [
   },
   {
     name: 'get_field_values',
-    description: 'Look up the exact stored values of a TAG-IT sentencing field (topics, drug types, law names, section tokens, punishment types) before filtering on it. Without a valid field it lists the available fields.',
+    description: 'Look up the exact stored values of a TAG-IT field (topics, drug types, law names, section tokens, punishment types) before filtering on it, in the sentencing catalogue or in the conditional-arrangements one. Without a valid field it lists the available fields.',
     input_schema: inputSchema(fieldValuesSchema),
   },
   {
     name: 'read_document',
-    description: 'Read the full text of one sentencing decision (kind "ruling") or guideline (kind "guideline") by id, to answer detailed follow-up questions.',
+    description: 'Read the full text of one sentencing decision (kind "ruling"), conditional arrangement (kind "arrangement") or guideline (kind "guideline") by id, to answer detailed follow-up questions.',
     input_schema: inputSchema(readDocumentSchema),
   },
 ];
@@ -210,7 +219,7 @@ export function validationError(toolUse, issues) {
   };
 }
 
-export function sentencingForModel(result, params) {
+export function sentencingForModel(result, params, corpus = 'sentencing') {
   const prison = result.items.map((i) => i.prisonMonths).filter((v) => v != null);
   return {
     label: params.label,
@@ -226,8 +235,9 @@ export function sentencingForModel(result, params) {
       : null,
     items: result.items.map((item, index) => ({
       rank: index + 1,
-      // Cite as [[ruling:ID]]; the app shows the verified case number. The bare id is not a case number.
-      ref: `ruling:${item.id}`,
+      // Cite as [[ruling:ID]] / [[arrangement:ID]]; the app shows the verified case number, and the bare id is
+      // not a case number.
+      ref: `${corpus === 'arrangements' ? 'arrangement' : 'ruling'}:${item.id}`,
       title: item.title,
       court: item.court,
       date: item.date,
@@ -249,8 +259,12 @@ export function sentencingForModel(result, params) {
 
 // The user's search setup wins over the model's parameters, so a choice made in the form cannot be dropped or
 // contradicted by the model. Model-set confessed/agreed_sentence give way to the same flag chosen by the user.
-export function withSentencingSetup(params, setup) {
-  const chosen = setup?.sentencing;
+export function withSentencingSetup(params, setup, corpus = 'sentencing') {
+  const chosen = setup?.[corpus];
+  if (corpus === 'arrangements') {
+    const withTypes = chosen?.punishment_types?.length ? { ...params, punishment_types: chosen.punishment_types } : params;
+    return forArrangements(chosen?.sort_direction ? { ...withTypes, sort_direction: chosen.sort_direction } : withTypes);
+  }
   if (!chosen) return params;
   const flags = { ...(params.flags ?? {}), ...chosen.flags };
   return {
@@ -259,6 +273,21 @@ export function withSentencingSetup(params, setup) {
     confessed: 'meta.confessed' in flags ? null : params.confessed,
     agreed_sentence: 'meta.agreed_sentence' in flags ? null : params.agreed_sentence,
     sort_direction: chosen.sort_direction ?? params.sort_direction,
+  };
+}
+
+// A conditional arrangement is closed by consent, without an indictment and without a court deciding anything:
+// there is no imprisonment, no criminal record, no sentencing range and no court instance in this corpus. Those
+// filters exist in the shared schema but would only empty the results, so they are dropped here.
+function forArrangements(params) {
+  return {
+    ...params,
+    flags: undefined,
+    confessed: null,
+    agreed_sentence: null,
+    prison_months_min: null,
+    prison_months_max: null,
+    court_instances: [],
   };
 }
 
@@ -290,22 +319,31 @@ export async function executeTool(toolUse, ctx) {
       };
     }
 
-    case 'search_sentencing_decisions': {
+    case 'search_sentencing_decisions':
+    case 'search_conditional_arrangements': {
+      const arrangements = toolUse.name === 'search_conditional_arrangements';
+      const corpus = arrangements ? 'arrangements' : 'sentencing';
       const parsed = sentencingParamsSchema.safeParse(toolUse.input);
       if (!parsed.success) return validationError(toolUse, parsed.error.issues);
-      const params = withSentencingSetup(parsed.data, ctx.searchSetup);
-      const label = `מחפש גזרי דין: ${params.label}`;
+      const params = withSentencingSetup(parsed.data, ctx.searchSetup, corpus);
+      const noun = arrangements ? 'הסדרים מותנים' : 'גזרי דין';
+      const label = `מחפש ${noun}: ${params.label}`;
+      const action = arrangements ? 'search_arrangements' : 'search_sentencing';
+      const uiType = arrangements ? 'arrangements' : 'results';
       activity(label, 'running');
       try {
-        const result = await tagit.searchSentencing(params, { signal });
-        await recordTagitCall({ account, conversationId, turnId, detail: { action: 'search_sentencing', label: params.label, filter: result.filter, sort: params.sort, sort_direction: params.sort_direction, text_query: params.text_query || undefined, total: result.total, returned: result.items.length } });
-        const data = { label: params.label, params, total: result.total, page: result.page, size: result.size, items: result.items };
+        const result = await tagit.searchSentencing(params, { signal, scope: tagit.corpusScope(corpus) });
+        await recordTagitCall({ account, conversationId, turnId, detail: { action, label: params.label, filter: result.filter, sort: params.sort, sort_direction: params.sort_direction, text_query: params.text_query || undefined, total: result.total, returned: result.items.length } });
+        const data = { label: params.label, params, total: result.total, page: result.page, size: result.size, items: result.items, corpus };
         activity(label, 'done', { summary: result.total != null ? `${result.total} תוצאות` : `${result.items.length} תוצאות` });
-        emit({ type: 'results', toolUseId: toolUse.id, data });
-        return { block: toolResult(toolUse, { ...sentencingForModel(result, params), applied_user_setup: ctx.searchSetup?.sentencing ?? null }), ui: { type: 'results', data } };
+        emit({ type: uiType, toolUseId: toolUse.id, data });
+        return {
+          block: toolResult(toolUse, { ...sentencingForModel(result, params, corpus), applied_user_setup: ctx.searchSetup?.[corpus] ?? null }),
+          ui: { type: uiType, data },
+        };
       } catch (err) {
         if (signal?.aborted) throw err;
-        await recordTagitCall({ account, conversationId, turnId, detail: { action: 'search_sentencing', label: params.label, error: tagitErrorMessage(err) } });
+        await recordTagitCall({ account, conversationId, turnId, detail: { action, label: params.label, error: tagitErrorMessage(err) } });
         activity(label, 'error');
         return { block: toolResult(toolUse, tagitErrorMessage(err), true), ui: null };
       }
@@ -369,7 +407,7 @@ export async function executeTool(toolUse, ctx) {
             ui: null,
           };
         }
-        const schema = await tagit.getSentencingSchema({ signal });
+        const schema = await tagit.getSentencingSchema({ signal, scope: tagit.corpusScope(parsed.data.corpus) });
         const def = (schema.fields ?? []).find((f) => f.key === field);
         activity(label, 'done');
         if (!def) {
@@ -397,11 +435,12 @@ export async function executeTool(toolUse, ctx) {
       const parsed = readDocumentSchema.safeParse(toolUse.input);
       if (!parsed.success) return validationError(toolUse, parsed.error.issues);
       const { kind, id, max_chars: maxChars } = parsed.data;
-      const label = kind === 'ruling' ? `קורא את גזר הדין (${id})` : `קורא את ההנחיה (${id})`;
+      const label = kind === 'ruling' ? `קורא את גזר הדין (${id})`
+        : kind === 'arrangement' ? `קורא את ההסדר המותנה (${id})` : `קורא את ההנחיה (${id})`;
       activity(label, 'running');
       try {
         let payload;
-        if (kind === 'ruling') {
+        if (kind !== 'guideline') {
           const doc = await tagit.readRulingText(id, { signal });
           payload = { id, filename: doc.filename, text: truncate(doc.text, maxChars), truncated: (doc.text?.length ?? 0) > maxChars };
         } else {

@@ -133,7 +133,7 @@ const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const PASTED_DOCUMENT_CHARS = 1500;
 
 // following = id of a conversation whose turn is still running on the server after the stream was lost.
-const state = { me: null, conversations: [], currentId: null, busy: false, controller: null, following: null, file: null, searchSetup: null };
+const state = { me: null, conversations: [], currentId: null, busy: false, controller: null, following: null, file: null, searchSetup: null, includeSource: false, includeRaw: false };
 const root = document.getElementById('root');
 let ui = {};
 
@@ -313,9 +313,11 @@ function renderApp() {
         h('a', { href: '/accessibility', text: 'הצהרת נגישות' }), ' · ', h('a', { href: '/privacy', text: 'מדיניות פרטיות' }))));
 
   const alertsBox = h('div', { class: 'llm-alerts', hidden: true });
+  const exportBar = renderExportBar();
   const main = h('main', { class: 'main', id: 'content', tabindex: '-1' },
     h('h1', { class: 'sr-only', text: 'מחקר ענישה: איתור גזרי דין והנחיות' }),
     alertsBox,
+    exportBar.el,
     thread,
     composer);
   root.replaceChildren(h('div', { class: 'app-shell' }, sidebar, main));
@@ -354,7 +356,7 @@ function renderApp() {
   syncSidebar();
 
   ui = {
-    sidebar, alertsBox, newButton, conversationList, quota, thread, threadInner, textarea, sendBtn, attachBtn, attachment, fileInput, composerError,
+    sidebar, alertsBox, exportBar, newButton, conversationList, quota, thread, threadInner, textarea, sendBtn, attachBtn, attachment, fileInput, composerError,
     closeSidebar: () => setSidebar(false),
   };
   showWelcome();
@@ -510,6 +512,7 @@ function renderConversation({ conversation, turns, running, lastRequest }, { foc
   for (const turn of turns) {
     for (const item of turn.ui?.items ?? []) {
       if (item.type === 'results') registerRulings(item.data?.items);
+      if (item.type === 'arrangements') registerArrangements(item.data?.items);
       if (item.type === 'guidelines') registerGuidelines(item.data?.items);
     }
   }
@@ -781,6 +784,7 @@ function handleEvent(event, assistant) {
     case 'activity': assistant.activity(event); break;
     case 'analysis':
     case 'results':
+    case 'arrangements':
     case 'guidelines':
       assistant.item({ type: event.type, data: event.data }, { toolUseId: event.toolUseId });
       break;
@@ -887,6 +891,9 @@ function createAssistantBlock(conversationId) {
       } else if (item.type === 'results') {
         el = renderResults(item.data, block);
         if (!quiet) announce(item.data.total != null ? `נמצאו ${item.data.total} גזרי דין.` : `הוצגו ${item.data.items.length} גזרי דין.`);
+      } else if (item.type === 'arrangements') {
+        el = renderResults(item.data, block, ARRANGEMENTS);
+        if (!quiet) announce(item.data.total != null ? `נמצאו ${item.data.total} הסדרים מותנים.` : `הוצגו ${item.data.items.length} הסדרים מותנים.`);
       } else if (item.type === 'guidelines') {
         el = renderGuidelines(item.data);
         if (!quiet) announce(`נמצאו ${item.data.items.length} הנחיות.`);
@@ -991,7 +998,7 @@ function clampedText(text, context) {
   return [p, toggle];
 }
 
-function renderRuling(r, rank) {
+function renderRuling(r, rank, corpus = SENTENCING) {
   const severityClass = r.prisonMonths >= 36 ? 'severity-high' : r.prisonMonths > 0 ? 'severity-mid' : '';
   const titleId = nextId('ruling');
   const detailsId = nextId('details');
@@ -1020,14 +1027,19 @@ function renderRuling(r, rank) {
         r.snippet ? h('p', { class: 'result-summary small muted', text: r.snippet }) : null,
         clampedText(r.summary, r.title),
         h('div', { class: 'result-actions' },
-          externalLink(r.fileUrl, 'פתיחת גזר הדין', `: ${r.title}`),
+          externalLink(r.fileUrl, corpus.open, `: ${r.title}`),
           r.sourceUrl ? externalLink(r.sourceUrl, 'מקור', `: ${r.title}`) : null,
-          detailsBtn),
+          detailsBtn,
+          itemExportButtons(corpus.kind, r)),
         details)));
 }
 
-function renderResults(data, block) {
-  registerRulings(data.items);
+// What tells the two document corpora apart on screen.
+const SENTENCING = { kind: 'ruling', corpus: 'sentencing', heading: 'גזרי דין', many: 'גזרי דין', order: 'מהעונש', open: 'פתיחת גזר הדין', empty: 'לא נמצאו גזרי דין התואמים את החיפוש.', register: (items) => registerRulings(items) };
+const ARRANGEMENTS = { kind: 'arrangement', corpus: 'arrangements', heading: 'הסדרים מותנים', many: 'הסדרים מותנים', order: 'מההסדר', open: 'פתיחת ההסדר', empty: 'לא נמצאו הסדרים מותנים התואמים את החיפוש.', register: (items) => registerArrangements(items) };
+
+function renderResults(data, block, corpus = SENTENCING) {
+  corpus.register(data.items);
   const PAGE = 10;
   const items = [...data.items];
   let shown = 0;
@@ -1039,14 +1051,14 @@ function renderResults(data, block) {
   const renderMore = (focusFirstNew = false) => {
     const next = items.slice(shown, shown + PAGE);
     const firstNew = next.map((r, i) => {
-      const li = renderRuling(r, shown + i + 1);
+      const li = renderRuling(r, shown + i + 1, corpus);
       list.append(li);
       return li;
     })[0];
     shown += next.length;
     if (focusFirstNew && firstNew) {
       firstNew.querySelector('.result-title a')?.focus();
-      announce(`נוספו ${next.length} גזרי דין. מוצגים ${shown}.`);
+      announce(`נוספו ${next.length} ${corpus.many}. מוצגים ${shown}.`);
     }
     const canFetch = data.total != null && items.length < data.total && data.params;
     more.replaceChildren();
@@ -1061,13 +1073,13 @@ function renderResults(data, block) {
           const res = await fetch('/api/tagit/sentencing/more', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ conversationId: block.conversationId, params: data.params, page: page + 1 }),
+            body: JSON.stringify({ conversationId: block.conversationId, params: data.params, page: page + 1, corpus: corpus.corpus }),
           });
           if (!res.ok) throw new Error();
           const nextPage = await res.json();
           page = nextPage.page;
           if (!nextPage.items.length) { data.total = items.length; }
-          registerRulings(nextPage.items);
+          corpus.register(nextPage.items);
           items.push(...nextPage.items);
           renderMore(true);
         } catch {
@@ -1080,12 +1092,12 @@ function renderResults(data, block) {
   };
   renderMore();
 
-  const count = data.total != null ? `נמצאו ${fmtNumber(data.total)} גזרי דין` : `${items.length} גזרי דין`;
+  const count = data.total != null ? `נמצאו ${fmtNumber(data.total)} ${corpus.many}` : `${items.length} ${corpus.many}`;
   return h('section', { class: 'results', 'aria-labelledby': headingId },
     h('div', { class: 'results-head' },
-      h('h3', { id: headingId, text: `גזרי דין · ${data.label}` }),
-      h('p', { class: 'results-query', text: `${count} · ${data.params?.sort === 'date' ? 'מהחדש לישן' : data.params?.sort_direction === 'desc' ? 'ממוינים מהעונש החמור לקל' : 'ממוינים מהעונש הקל לחמור'}` })),
-    items.length ? list : h('div', { class: 'notice-box', text: 'לא נמצאו גזרי דין התואמים את החיפוש.' }),
+      h('h3', { id: headingId, text: `${corpus.heading} · ${data.label}` }),
+      h('p', { class: 'results-query', text: `${count} · ${data.params?.sort === 'date' ? 'מהחדש לישן' : `ממוינים ${corpus.order} ${data.params?.sort_direction === 'desc' ? 'החמור לקל' : 'הקל לחמור'}`}` })),
+    items.length ? list : h('div', { class: 'notice-box', text: corpus.empty }),
     more);
 }
 
@@ -1110,7 +1122,7 @@ function renderGuidelines(data) {
                 g.effectiveDate ? h('span', { class: 'badge badge-muted', text: `בתוקף מ-${fmtDate(g.effectiveDate)}` }) : null,
                 g.supersedes ? h('span', { class: 'badge badge-muted', text: `מחליפה: ${g.supersedes}` }) : null),
               clampedText(g.summary, g.title),
-              h('div', { class: 'result-actions' }, externalLink(g.fileUrl, 'פתיחת ההנחיה', `: ${g.title}`)))));
+              h('div', { class: 'result-actions' }, externalLink(g.fileUrl, 'פתיחת ההנחיה', `: ${g.title}`), itemExportButtons('guideline', g)))));
       }))
       : h('div', { class: 'notice-box', text: 'לא נמצאו הנחיות התואמות את החיפוש.' }));
 }
@@ -1120,15 +1132,171 @@ function disableQuestions(section) {
   section.querySelectorAll('button, input, select').forEach((el) => { el.disabled = true; });
 }
 
+// ---------- Exports (PDF / DOCX) ----------
+// The server builds the file in the background (full texts come from TAG-IT); the browser polls until it is ready.
+
+// At most this many sentencing decisions (and as many arrangements) go into one export: the first ones shown.
+const MAX_RULINGS = 30;
+
+const EXPORT_SCOPES = {
+  rulings: { label: 'כל גזרי הדין', done: 'גזרי הדין' },
+  arrangements: { label: 'כל ההסדרים המותנים', done: 'ההסדרים המותנים' },
+  guidelines: { label: 'כל ההנחיות', done: 'ההנחיות' },
+  all: { label: 'הכל יחד', done: 'התוצאות' },
+};
+
+const inScope = (scope, kind) => scope === 'all' || scope === `${kind}s`;
+const exportItems = (scope) => [
+  ...(inScope(scope, 'ruling') ? [...knownRulings.values()].slice(0, MAX_RULINGS).map((data) => ({ kind: 'ruling', id: String(data.id), data })) : []),
+  ...(inScope(scope, 'arrangement') ? [...knownArrangements.values()].slice(0, MAX_RULINGS).map((data) => ({ kind: 'arrangement', id: String(data.id), data })) : []),
+  ...(inScope(scope, 'guideline') ? [...knownGuidelines.values()].map((data) => ({ kind: 'guideline', id: String(data.id), data })) : []),
+];
+
+function downloadBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = h('a', { href: url, download: name, hidden: true });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+function fileNameFrom(res, fallback) {
+  const header = res.headers.get('content-disposition') ?? '';
+  const encoded = header.match(/filename\*=UTF-8''([^;]+)/i);
+  if (encoded) { try { return decodeURIComponent(encoded[1]); } catch { /* fall through */ } }
+  return fallback;
+}
+
+// Runs one export and reports progress through onProgress(text). Resolves when the file was handed to the browser.
+async function runExport({ scope, format, items }, onProgress) {
+  const res = await fetch('/api/export', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      conversationId: state.currentId, scope, format, items,
+      includeSource: format === 'pdf' && state.includeSource,
+      includeRaw: format === 'pdf' && state.includeRaw, // Word: the site's content only
+    }),
+  });
+  const started = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(started.message || 'הייצוא נכשל.');
+  for (let attempt = 0; attempt < 400; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, attempt < 3 ? 700 : 1500));
+    const poll = await fetch(`/api/export/${started.jobId}`);
+    if (poll.status === 202) {
+      const p = await poll.json().catch(() => ({}));
+      if (p.total > 1) onProgress?.(`מכין את הקובץ… ${p.done} מתוך ${p.total} מסמכים`);
+      continue;
+    }
+    if (!poll.ok) throw new Error((await poll.json().catch(() => ({}))).message || 'הייצוא נכשל.');
+    downloadBlob(await poll.blob(), fileNameFrom(poll, `export.${format}`));
+    return;
+  }
+  throw new Error('הייצוא נמשך זמן רב מדי.');
+}
+
+// A PDF and a DOCX button for one decision or guideline.
+function itemExportButtons(kind, data) {
+  if (data?.id == null) return null;
+  const noun = kind === 'ruling' ? 'גזר הדין' : kind === 'arrangement' ? 'ההסדר המותנה' : 'ההנחיה';
+  const button = (format, label) => {
+    const btn = h('button', { class: 'btn btn-secondary btn-sm', type: 'button', onClick: async () => {
+      if (!state.currentId) return;
+      btn.disabled = true;
+      const original = btn.textContent;
+      btn.textContent = 'מכין…';
+      announce(`מכין את ${noun} לייצוא.`);
+      try {
+        await runExport({ scope: kind, format, items: [{ kind, id: String(data.id), data }] });
+        announce(`קובץ ${label} של ${noun} הורד.`);
+      } catch (err) {
+        announce(err.message, { assertive: true });
+        btn.title = err.message;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = original;
+      }
+    } }, label, srOnly(` – ייצוא ${noun}: ${data.title ?? ''}`));
+    return btn;
+  };
+  return h('span', { class: 'item-export', role: 'group', 'aria-label': `ייצוא ${noun}` }, button('pdf', 'PDF'), button('docx', 'Word'));
+}
+
+// "Export" panel above the thread: every decision / every guideline / both, in PDF or DOCX.
+function renderExportBar() {
+  const status = h('p', { class: 'export-status small', role: 'status' });
+  const counts = h('span', { class: 'muted' });
+  const buttons = [];
+  const row = (scope) => {
+    const make = (format, label) => {
+      const btn = h('button', { class: 'btn btn-secondary btn-sm', type: 'button', onClick: async () => {
+        const items = exportItems(scope);
+        if (!items.length || !state.currentId) return;
+        buttons.forEach((b) => { b.disabled = true; });
+        status.textContent = 'מכין את הקובץ…';
+        try {
+          await runExport({ scope, format, items }, (text) => { status.textContent = text; });
+          status.textContent = `קובץ ${label} של ${EXPORT_SCOPES[scope].done} הורד.`;
+        } catch (err) {
+          status.textContent = err.message;
+        } finally {
+          sync();
+        }
+      } }, label, srOnly(` – ${EXPORT_SCOPES[scope].label}`));
+      btn.dataset.scope = scope;
+      buttons.push(btn);
+      return btn;
+    };
+    return h('div', { class: 'export-row' },
+      h('span', { class: 'export-row-label', text: EXPORT_SCOPES[scope].label }), make('pdf', 'PDF'), make('docx', 'Word'));
+  };
+  // What a PDF holds: the content shown in the site, or that and each document's original from the database.
+  const rawName = nextId('export-raw');
+  const rawOption = (value, label) => {
+    const id = `${rawName}-${value}`;
+    return h('label', { class: 'export-option', for: id },
+      h('input', { type: 'radio', name: rawName, id, value, checked: String(state.includeRaw) === value,
+        onChange: () => { state.includeRaw = value === 'true'; } }),
+      h('span', { text: label }));
+  };
+  const rawChoice = h('fieldset', { class: 'export-choice' },
+    h('legend', { text: 'תוכן קובץ ה-PDF' }),
+    rawOption('false', 'תוכן האתר בלבד (הפרטים, התקציר, הנאשמים והמתחמים)'),
+    rawOption('true', 'תוכן האתר וגם חומר הגלם: אחרי כל מסמך, הקובץ המקורי מהמאגר כפי שנשמר (כשהוא קיים)'));
+  const sourceId = nextId('export-source');
+  const sourceBox = h('input', { type: 'checkbox', id: sourceId, onChange: (e) => { state.includeSource = e.target.checked; } });
+  const el = h('details', { class: 'export-bar', hidden: true },
+    h('summary', {}, 'ייצוא התוצאות ל-PDF או Word ', counts),
+    h('div', { class: 'export-body' },
+      row('rulings'), row('arrangements'), row('guidelines'), row('all'),
+      rawChoice,
+      h('label', { class: 'export-option', for: sourceId }, sourceBox,
+        h('span', { text: 'בייצוא ל-PDF: לצרף בתחילת הקובץ את מסמך המקור (הקובץ שהועלה או הטקסט שהודבק). חל גם על ייצוא של מסמך בודד.' })),
+      h('p', { class: 'small muted', style: 'margin:0', text: `קובץ Word כולל את תוכן האתר בלבד. הטקסט בגופן Arial בגודל 13, ממורכז, ברווח שורות 1.5. מיוצאים עד ${MAX_RULINGS} גזרי דין ועד ${MAX_RULINGS} הסדרים מותנים: הראשונים שהוצגו בשיחה.` }),
+      status));
+  const sync = () => {
+    const r = Math.min(knownRulings.size, MAX_RULINGS);
+    const a = Math.min(knownArrangements.size, MAX_RULINGS);
+    const g = knownGuidelines.size;
+    el.hidden = !r && !a && !g;
+    counts.textContent = `(${[r ? `${r} גזרי דין` : null, a ? `${a} הסדרים מותנים` : null, g ? `${g} הנחיות` : null].filter(Boolean).join(', ')})`;
+    for (const btn of buttons) btn.disabled = !exportItems(btn.dataset.scope).length;
+  };
+  sync();
+  return { el, sync, reset: () => { status.textContent = ''; sync(); } };
+}
+
 // ---------- Citations in the model's text ----------
 // The model never types case numbers: it writes [[ruling:ID]] / [[guideline:ID]] and the app renders a link
 // labelled from TAG-IT's data. Any case number it still types is kept only if it matches a ruling returned in
 // this conversation; otherwise the number is dropped, since a missing number is better than a wrong one.
 
 const knownRulings = new Map();
+const knownArrangements = new Map();
 const knownGuidelines = new Map();
 
-const CITATION_TOKEN = /\[\[(ruling|guideline):(\d{1,12})\]\]/g;
+const CITATION_TOKEN = /\[\[(ruling|arrangement|guideline):(\d{1,12})\]\]/g;
 // A court case number with its prefix, e.g. ת"פ 20328-06-25, תפ"ח 1234-05-20, ע"פ 3261/15.
 const TYPED_CASE_NUMBER = /[א-ת]{1,4}["״'׳][א-ת]{1,2}\s*\d{1,6}(?:[-–]\d{1,2}[-–]\d{2,5}|\/\d{2,4})/g;
 const numberSignature = (text) => (String(text).match(/\d+/g) ?? []).map((n) => String(Number(n))).sort().join('|');
@@ -1136,13 +1304,21 @@ const caseNumbersIn = (text) => String(text ?? '').match(TYPED_CASE_NUMBER) ?? [
 
 function registerRulings(items) {
   for (const r of items ?? []) if (r?.id != null) knownRulings.set(String(r.id), r);
+  ui.exportBar?.sync();
+}
+function registerArrangements(items) {
+  for (const a of items ?? []) if (a?.id != null) knownArrangements.set(String(a.id), a);
+  ui.exportBar?.sync();
 }
 function registerGuidelines(items) {
   for (const g of items ?? []) if (g?.id != null) knownGuidelines.set(String(g.id), g);
+  ui.exportBar?.sync();
 }
 function resetCitations() {
   knownRulings.clear();
+  knownArrangements.clear();
   knownGuidelines.clear();
+  ui.exportBar?.reset();
 }
 
 // The number shown for a ruling comes from its title (what its card shows), and only when TAG-IT's separate
@@ -1156,7 +1332,7 @@ function verifiedCaseNumber(r) {
 
 function knownCaseSignatures() {
   const signatures = new Set();
-  for (const r of knownRulings.values()) {
+  for (const r of [...knownRulings.values(), ...knownArrangements.values()]) {
     const number = verifiedCaseNumber(r);
     if (number) signatures.add(numberSignature(number));
   }
@@ -1164,10 +1340,11 @@ function knownCaseSignatures() {
 }
 
 function citationNode(kind, id) {
-  if (kind === 'ruling') {
-    const r = knownRulings.get(id);
-    if (!r) return document.createTextNode('גזר דין');
-    const label = verifiedCaseNumber(r) ?? 'גזר הדין';
+  if (kind === 'ruling' || kind === 'arrangement') {
+    const noun = kind === 'ruling' ? 'גזר דין' : 'הסדר מותנה';
+    const r = (kind === 'ruling' ? knownRulings : knownArrangements).get(id);
+    if (!r) return document.createTextNode(noun);
+    const label = verifiedCaseNumber(r) ?? (kind === 'ruling' ? 'גזר הדין' : 'ההסדר המותנה');
     return externalLink(r.fileUrl, label, `: ${r.title}`);
   }
   const g = knownGuidelines.get(id);
@@ -1222,32 +1399,53 @@ const clip = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 function renderSearchSetup(q, { live, prior }) {
   const id = nextId('setup');
   const textId = `${id}-text`;
-  const sentencing = h('input', { type: 'checkbox', id: `${id}-sentencing`, checked: prior ? prior.mode !== 'guidelines' : true });
-  const guidelines = h('input', { type: 'checkbox', id: `${id}-guidelines`, checked: prior ? prior.mode !== 'sentencing' : false });
+  // Default: sentencing decisions (a choice already made in this conversation wins).
+  const chosenKinds = new Set(prior?.kinds ?? ['sentencing']);
+  const kindBox = (name) => h('input', { type: 'checkbox', id: `${id}-${name}`, checked: chosenKinds.has(name) });
+  const sentencing = kindBox('sentencing');
+  const arrangements = kindBox('arrangements');
+  const guidelines = kindBox('guidelines');
   const kind = (input, title, description) => h('label', { class: 'setup-kind', for: input.id },
     input, h('span', { class: 'setup-kind-text' }, h('strong', { text: title }), h('span', { text: description })));
 
-  const sortName = `${id}-sort`;
-  const chosenSort = prior?.sentencing?.sort_direction ?? 'asc';
-  const sortOption = (value, label) => {
-    const radioId = `${sortName}-${value}`;
-    return h('label', { class: 'setup-radio', for: radioId },
-      h('input', { type: 'radio', name: sortName, id: radioId, value, checked: chosenSort === value }), h('span', { text: label }));
+  const sortFieldset = (name, [light, heavy]) => {
+    const sortName = `${id}-${name}-sort`;
+    const chosenSort = prior?.[name]?.sort_direction ?? 'asc';
+    const sortOption = (value, label) => {
+      const radioId = `${sortName}-${value}`;
+      return h('label', { class: 'setup-radio', for: radioId },
+        h('input', { type: 'radio', name: sortName, id: radioId, value, checked: chosenSort === value }), h('span', { text: label }));
+    };
+    return { sortName, el: h('fieldset', { class: 'setup-fieldset' },
+      h('legend', { text: 'סדר התוצאות' }),
+      h('div', { class: 'setup-radios' }, sortOption('asc', light), sortOption('desc', heavy))) };
   };
 
+  // Sentencing decisions: the yes/no facts of how the sentence was reached.
   const flagSelects = new Map();
-  const sourceBoxes = new Map();
   const flagsGrid = h('div', { class: 'setup-flags' }, h('p', { class: 'small muted', text: 'טוען את נתוני גזירת העונש…' }));
-  const sourcesList = h('div', { class: 'setup-sources' }, h('p', { class: 'small muted', text: 'טוען את רשימת המקורות…' }));
-
+  const sentencingSort = sortFieldset('sentencing', ['מהעונש הקל לחמור', 'מהעונש החמור לקל']);
   const sentencingPanel = h('div', { class: 'setup-panel' },
-    h('fieldset', { class: 'setup-fieldset' },
-      h('legend', { text: 'סדר התוצאות' }),
-      h('div', { class: 'setup-radios' }, sortOption('asc', 'מהעונש הקל לחמור'), sortOption('desc', 'מהעונש החמור לקל'))),
+    sentencingSort.el,
     h('fieldset', { class: 'setup-fieldset' },
       h('legend', { text: 'גזירת העונש' }),
       h('p', { class: 'question-help', text: '"הכל" משאיר את הנתון פתוח; "כן" או "לא" מצמצמים את התוצאות.' }),
       flagsGrid));
+
+  // A conditional arrangement is closed by consent, without an indictment: there is no imprisonment, no criminal
+  // record and no sentencing range in it, only what the suspect undertook. That is what it is filtered by.
+  const punishmentBoxes = new Map();
+  const punishmentsList = h('div', { class: 'setup-sources' }, h('p', { class: 'small muted', text: 'טוען את סוגי הענישה…' }));
+  const arrangementsSort = sortFieldset('arrangements', ['מההסדר הקל לחמור', 'מההסדר החמור לקל']);
+  const arrangementsPanel = h('div', { class: 'setup-panel' },
+    arrangementsSort.el,
+    h('fieldset', { class: 'setup-fieldset' },
+      h('legend', { text: 'הענישה בהסדר' }),
+      h('p', { class: 'question-help', text: 'אם לא נבחר סוג, יוחזרו הסדרים מכל הסוגים.' }),
+      punishmentsList));
+
+  const sourceBoxes = new Map();
+  const sourcesList = h('div', { class: 'setup-sources' }, h('p', { class: 'small muted', text: 'טוען את רשימת המקורות…' }));
 
   const allSources = h('button', { class: 'link-btn', type: 'button', onClick: () => {
     const anyUnchecked = [...sourceBoxes.values()].some((box) => !box.checked);
@@ -1270,6 +1468,15 @@ function renderSearchSetup(q, { live, prior }) {
       flagSelects.set(flag.key, { select, label: flag.label });
       return h('div', { class: 'setup-flag' }, h('label', { class: 'label', for: selectId, text: flag.label }), select);
     }));
+    const priorPunishments = prior?.arrangements?.punishment_types ?? [];
+    punishmentsList.replaceChildren(...((options.arrangementPunishments ?? []).length
+      ? options.arrangementPunishments.map((value) => {
+        const boxId = nextId('punishment');
+        const box = h('input', { type: 'checkbox', id: boxId, checked: priorPunishments.includes(value), disabled: !live });
+        punishmentBoxes.set(value, box);
+        return h('label', { class: 'setup-source', for: boxId }, box, h('span', { text: value }));
+      })
+      : [h('p', { class: 'small', text: 'רשימת סוגי הענישה אינה זמינה כרגע; החיפוש יכלול את כל ההסדרים.' })]));
     const chosen = new Set(prior?.guidelines?.sources ?? []);
     sourcesList.replaceChildren(...(options.guidelineSources.length
       ? options.guidelineSources.map((source) => {
@@ -1283,55 +1490,75 @@ function renderSearchSetup(q, { live, prior }) {
     allSources.hidden = !options.guidelineSources.length;
   }).catch(() => {
     flagsGrid.replaceChildren(h('p', { class: 'small', text: 'נתוני גזירת העונש אינם זמינים כרגע. אפשר לחפש גם בלעדיהם.' }));
+    punishmentsList.replaceChildren(h('p', { class: 'small', text: 'רשימת סוגי הענישה אינה זמינה כרגע; החיפוש יכלול את כל ההסדרים.' }));
     sourcesList.replaceChildren(h('p', { class: 'small', text: 'רשימת המקורות אינה זמינה כרגע; החיפוש יכלול את כל המקורות.' }));
     allSources.hidden = true;
   });
 
+  const kindBoxes = [sentencing, arrangements, guidelines];
   const sync = () => {
     sentencingPanel.hidden = !sentencing.checked;
+    arrangementsPanel.hidden = !arrangements.checked;
     guidelinesPanel.hidden = !guidelines.checked;
   };
-  sentencing.addEventListener('change', sync);
-  guidelines.addEventListener('change', sync);
+  kindBoxes.forEach((box) => box.addEventListener('change', sync));
   sync();
-  if (!live) [sentencing, guidelines].forEach((box) => { box.disabled = true; });
+  if (!live) kindBoxes.forEach((box) => { box.disabled = true; });
 
   const el = h('div', { class: 'question search-setup', role: 'group', 'aria-labelledby': textId },
     h('p', { class: 'question-text', id: textId, text: q.text || 'מה לחפש?' }),
     h('div', { class: 'setup-kinds' },
       kind(sentencing, 'גזרי דין', 'גזרי דין בעבירות דומות, עם סינון לפי נתוני גזירת העונש'),
+      kind(arrangements, 'הסדרים מותנים', 'תיקים שנסגרו בהסדר מותנה, ללא הגשת כתב אישום'),
       kind(guidelines, 'הנחיות', 'הנחיות לפי הגוף שפרסם אותן')),
     sentencingPanel,
+    arrangementsPanel,
     guidelinesPanel);
 
+  const sortOf = (sortName) => (el.querySelector(`input[name="${sortName}"]:checked`)?.value === 'desc' ? 'desc' : 'asc');
+
   const answer = () => {
-    if (!sentencing.checked && !guidelines.checked) return { error: 'יש לסמן גזרי דין, הנחיות או את שניהם.', focus: sentencing };
-    const mode = sentencing.checked && guidelines.checked ? 'both' : sentencing.checked ? 'sentencing' : 'guidelines';
-    const flags = {};
-    const flagText = [];
-    for (const [key, { select, label }] of flagSelects) {
-      if (!select.value) continue;
-      flags[key] = select.value === 'true';
-      flagText.push(`${label}: ${flags[key] ? 'כן' : 'לא'}`);
-    }
-    const sortDirection = el.querySelector(`input[name="${sortName}"]:checked`)?.value === 'desc' ? 'desc' : 'asc';
+    const kinds = [['sentencing', sentencing], ['arrangements', arrangements], ['guidelines', guidelines]]
+      .filter(([, box]) => box.checked).map(([name]) => name);
+    if (!kinds.length) return { error: 'יש לסמן לפחות סוג אחד של תוצאות: גזרי דין, הסדרים מותנים או הנחיות.', focus: sentencing };
     const sources = [...sourceBoxes].filter(([, box]) => box.checked).map(([value]) => value);
     // Everything ticked is the same as no filter, and cheaper to search.
     const sourceFilter = sources.length === sourceBoxes.size ? [] : sources;
+    const setup = { kinds };
     const summary = [];
-    if (mode !== 'guidelines') summary.push(`גזרי דין (${sortDirection === 'asc' ? 'מהקל לחמור' : 'מהחמור לקל'})`, ...flagText);
-    if (mode !== 'sentencing') summary.push(`הנחיות: ${sourceFilter.length ? sourceFilter.join(', ') : 'כל המקורות'}`);
+    const order = (direction) => (direction === 'asc' ? 'מהקל לחמור' : 'מהחמור לקל');
+    if (sentencing.checked) {
+      const flags = {};
+      const flagText = [];
+      for (const [key, { select, label }] of flagSelects) {
+        if (!select.value) continue;
+        flags[key] = select.value === 'true';
+        flagText.push(`${label}: ${flags[key] ? 'כן' : 'לא'}`);
+      }
+      const sortDirection = sortOf(sentencingSort.sortName);
+      setup.sentencing = { flags, sort_direction: sortDirection };
+      summary.push(`גזרי דין (${order(sortDirection)})`, ...flagText);
+    }
+    if (arrangements.checked) {
+      const punishments = [...punishmentBoxes].filter(([, box]) => box.checked).map(([value]) => value);
+      // Everything ticked is the same as no filter, and cheaper to search.
+      const punishmentFilter = punishments.length === punishmentBoxes.size ? [] : punishments;
+      const sortDirection = sortOf(arrangementsSort.sortName);
+      setup.arrangements = { punishment_types: punishmentFilter, sort_direction: sortDirection };
+      summary.push(`הסדרים מותנים (${order(sortDirection)})`,
+        `ענישה: ${punishmentFilter.length ? punishmentFilter.join(', ') : 'כל הסוגים'}`);
+    }
+    if (guidelines.checked) {
+      setup.guidelines = { sources: sourceFilter };
+      summary.push(`הנחיות: ${sourceFilter.length ? sourceFilter.join(', ') : 'כל המקורות'}`);
+    }
     return {
       answer: {
         id: q.id,
         question: clip(q.text || 'מה לחפש?', 500),
-        selected: [{ value: mode, label: clip(summary.join(' · '), 300) }],
+        selected: [{ value: kinds.join('+'), label: clip(summary.join(' · '), 300) }],
         free_text: null,
-        setup: {
-          mode,
-          ...(mode !== 'guidelines' ? { sentencing: { flags, sort_direction: sortDirection } } : {}),
-          ...(mode !== 'sentencing' ? { guidelines: { sources: sourceFilter } } : {}),
-        },
+        setup,
       },
     };
   };

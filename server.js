@@ -8,6 +8,7 @@ import { assertAuthConfig, attachUser, requireAdmin } from './src/auth.js';
 import { blockCrossSiteWrites, securityHeaders } from './src/security.js';
 import { chatRouter, chatErrorHandler, drainActiveTurns } from './src/routes/chat.js';
 import { adminRouter } from './src/routes/admin.js';
+import { exportRouter } from './src/routes/export.js';
 import { runSelfCheck } from './src/selfcheck.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -24,6 +25,8 @@ const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', true);
 app.use(securityHeaders);
+// Export requests carry the card data of up to 150 results.
+app.use('/api/export', express.json({ limit: '5mb' }));
 app.use(express.json({ limit: '1mb' }));
 
 // Public shell: GET / must answer 200 for the xhostd health check; the page itself checks sign-in.
@@ -44,6 +47,7 @@ if (process.env.NODE_ENV !== 'production') {
 app.use('/api', blockCrossSiteWrites);
 app.use('/api', attachUser);
 app.use('/api/admin', adminRouter);
+app.use('/api', exportRouter);
 app.use('/api', chatRouter);
 // The admin page lives outside public/, so the admin check below is the only way to reach it.
 app.get('/admin', attachUser, (req, res) => {

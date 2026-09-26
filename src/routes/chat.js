@@ -14,7 +14,7 @@ import { finishTurn, lastTurn, startTurn } from '../turns.js';
 import { rateLimit } from '../security.js';
 import { runTurn } from '../agent.js';
 import { sentencingParamsSchema, withSentencingSetup } from '../tools.js';
-import { getGuidelineSources, getSentencingFlags, loadSearchSetup, saveSearchSetup, searchSetupSchema } from '../search-options.js';
+import { getArrangementPunishments, getGuidelineSources, getSentencingFlags, loadSearchSetup, normalizeSetup, saveSearchSetup, searchSetupSchema } from '../search-options.js';
 import * as tagit from '../tagit.js';
 
 export const chatRouter = Router();
@@ -108,7 +108,8 @@ chatRouter.get('/conversations/:id', requireActive, async (req, res) => {
     [conversation.id],
   );
   res.json({
-    conversation,
+    // Setups saved before conditional arrangements existed are shown in the current shape.
+    conversation: { ...conversation, search_setup: normalizeSetup(conversation.search_setup) },
     turns: rows,
     running: activeTurns.has(conversation.id),
     lastRequest: await lastTurn(conversation.id),
@@ -196,6 +197,11 @@ chatRouter.post('/chat', requireActive, rateLimit({ name: 'chat', limit: 30, win
     conversation = rows[0];
   }
   if (activeTurns.has(conversation.id)) return res.status(409).json({ error: 'turn_in_progress' });
+  // The original PDF, for exports that start with the source document.
+  if (req.file && docName && /\.pdf$/i.test(docName)) {
+    await query('INSERT INTO source_files (conversation_id, name, mime, data) VALUES ($1, $2, $3, $4)',
+      [conversation.id, docName, 'application/pdf', req.file.buffer]).catch((err) => console.warn('[chat] source file not stored', err.message));
+  }
   const setupAnswer = answers?.find((a) => a.setup);
   if (setupAnswer) await saveSearchSetup(conversation.id, setupAnswer.setup);
 
@@ -307,11 +313,14 @@ export async function drainActiveTurns(timeoutMs) {
 const tagitLimit = rateLimit({ name: 'tagit', limit: 120, windowMs: TEN_MINUTES });
 
 // "Show more" on a result card: fetches the next page without spending model tokens.
-// Options for the search-setup form: sentencing flags (from the Z-G site's config) and guideline sources.
+// Options for the search-setup form: sentencing flags (from the Z-G site's config), the punishments of
+// conditional arrangements and guideline sources.
 chatRouter.get('/search-options', requireActive, async (_req, res) => {
-  const [{ flags, source }, guidelineSources] = await Promise.all([getSentencingFlags(), getGuidelineSources()]);
+  const [{ flags, source }, guidelineSources, arrangementPunishments] = await Promise.all([
+    getSentencingFlags(), getGuidelineSources(), getArrangementPunishments(),
+  ]);
   res.set('Cache-Control', 'private, max-age=300');
-  res.json({ sentencingFlags: flags, flagsSource: source, guidelineSources, defaults: { sortDirection: 'asc' } });
+  res.json({ sentencingFlags: flags, flagsSource: source, guidelineSources, arrangementPunishments, defaults: { sortDirection: 'asc' } });
 });
 
 chatRouter.post('/tagit/sentencing/more', requireActive, tagitLimit, async (req, res) => {
@@ -320,22 +329,62 @@ chatRouter.post('/tagit/sentencing/more', requireActive, tagitLimit, async (req,
   const parsed = sentencingParamsSchema.safeParse(req.body?.params);
   if (!parsed.success) return res.status(400).json({ error: 'invalid_params' });
   const page = Math.max(1, Math.min(Number.parseInt(req.body?.page, 10) || 2, 50));
+  // Conditional arrangements page through their own scope with their own setup.
+  const corpus = req.body?.corpus === 'arrangements' ? 'arrangements' : 'sentencing';
+  const action = corpus === 'arrangements' ? 'more_arrangements' : 'more_sentencing';
   const turnId = await startTurn({
     account: req.account, conversationId: conversation.id, kind: 'more', text: `${parsed.data.label} · עמוד ${page}`,
   });
   try {
     // The same user setup the first page was searched with, even if the browser sent older parameters.
-    const result = await tagit.searchSentencing(withSentencingSetup(parsed.data, await loadSearchSetup(conversation.id)), { page });
-    await recordTagitCall({ account: req.account, conversationId: conversation.id, turnId, detail: { action: 'more_sentencing', label: parsed.data.label, page, total: result.total, returned: result.items.length } });
+    const result = await tagit.searchSentencing(withSentencingSetup(parsed.data, await loadSearchSetup(conversation.id), corpus), { page, scope: tagit.corpusScope(corpus) });
+    await recordTagitCall({ account: req.account, conversationId: conversation.id, turnId, detail: { action, label: parsed.data.label, page, total: result.total, returned: result.items.length } });
     await finishTurn(turnId, 'completed');
     res.json({ page: result.page, total: result.total, items: result.items });
   } catch (err) {
     console.error('[tagit] more failed', err);
-    await recordTagitCall({ account: req.account, conversationId: conversation.id, turnId, detail: { action: 'more_sentencing', label: parsed.data.label, page, error: err.message } });
+    await recordTagitCall({ account: req.account, conversationId: conversation.id, turnId, detail: { action, label: parsed.data.label, page, error: err.message } });
     await finishTurn(turnId, 'error', err.message);
     res.status(502).json({ error: 'tagit_error' });
   }
 });
+
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
+
+// TAG-IT keeps the extracted text of every document, but not always the file it came from: the conditional
+// arrangements have no stored files at all, and a ruling's file can disappear ("no longer available on disk").
+// Rather than a dead link, the reader gets the text of the same document.
+async function serveStoredText(kind, id, res, signal) {
+  if (kind === 'guideline') return false;
+  let doc;
+  try {
+    doc = await tagit.readRulingText(id, { signal });
+  } catch {
+    return false;
+  }
+  const text = doc?.text ?? '';
+  if (!text.trim()) return false;
+  const title = doc.filename || `מסמך ${id}`;
+  res.status(200).type('html').send(`<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<link rel="stylesheet" href="/vendor/heebo/index.css">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body class="stored-text-page">
+<main>
+<h1>${escapeHtml(title)}</h1>
+<p class="notice-box">הקובץ המקורי אינו שמור במאגר TAG-IT. לפניכם הטקסט של המסמך כפי שנשמר במאגר.</p>
+<article class="card"><pre>${escapeHtml(text)}</pre></article>
+</main>
+</body>
+</html>`);
+  return true;
+}
 
 // Serves a TAG-IT file from our origin without letting upstream decide how the browser treats it:
 // only PDFs are shown inline; anything else is a download. Stream errors and client disconnects are handled.
@@ -350,6 +399,11 @@ async function proxyFile(kind, req, res) {
   } catch (err) {
     if (controller.signal.aborted) return;
     const status = err instanceof tagit.TagitError && [404, 410].includes(err.status) ? err.status : 502;
+    if (status !== 502 && await serveStoredText(kind, id, res, controller.signal)) {
+      await recordTagitCall({ account: req.account, conversationId: null, detail: { action: 'open_text', kind, id, fileStatus: status } }).catch(() => {});
+      return;
+    }
+    if (controller.signal.aborted) return;
     return res.status(status).type('text/plain').send(status === 502 ? 'לא ניתן היה לטעון את המסמך מ-TAG-IT.' : 'המסמך אינו זמין.');
   }
   await recordTagitCall({ account: req.account, conversationId: null, detail: { action: 'open_file', kind, id } }).catch(() => {});

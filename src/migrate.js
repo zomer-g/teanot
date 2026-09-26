@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS turns (
   request_text     TEXT,
   file_name        TEXT,
   answers          JSONB,
-  status           TEXT NOT NULL DEFAULT 'running', -- running | completed | awaiting_input | aborted | interrupted | error | quota_exceeded | refused | truncated | iteration_limit
+  status           TEXT NOT NULL DEFAULT 'running', -- running | completed | awaiting_input | aborted | interrupted | error | quota_exceeded | refused | truncated | iteration_limit | empty_reply | malformed_tool_call
   error            TEXT,
   started_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   finished_at      TIMESTAMPTZ
@@ -104,6 +104,18 @@ CREATE TABLE IF NOT EXISTS provider_keys (
   updated_by  TEXT,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Uploaded PDFs kept as is, so a PDF export can start with the original document (text-only PDFs are otherwise
+-- stored only as their extracted text in messages).
+CREATE TABLE IF NOT EXISTS source_files (
+  id               SERIAL PRIMARY KEY,
+  conversation_id  UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  name             TEXT NOT NULL,
+  mime             TEXT NOT NULL,
+  data             BYTEA NOT NULL,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS source_files_conversation ON source_files (conversation_id, id DESC);
 `;
 
 const DEFAULT_SETTINGS = {

@@ -563,3 +563,40 @@ body.app-page #root { flex: 1; min-height: 0; display: flex; flex-direction: col
   .chip[aria-pressed="true"], .mode-btn[aria-pressed="true"] { outline: 3px solid Highlight; }
   .quota-bar, .mini-bar { border: 1px solid CanvasText; }
 }
+
+/* ---------- Exports ---------- */
+.export-bar {
+  margin: 10px 16px 0; border: 2px solid var(--primary); border-radius: var(--radius-lg);
+  background: #fff; font-size: 14px; box-shadow: var(--shadow-md); overflow: hidden;
+}
+.export-bar > summary {
+  cursor: pointer; padding: 12px 16px; font-weight: 700; font-size: 16px; min-height: 28px;
+  background: var(--primary); color: #fff; display: flex; align-items: center; gap: 8px; list-style: none;
+}
+.export-bar > summary::-webkit-details-marker { display: none; }
+.export-bar > summary::before { content: '⤓'; font-size: 20px; line-height: 1; }
+.export-bar > summary::after { content: '▾'; margin-inline-start: auto; font-size: 13px; }
+.export-bar[open] > summary::after { content: '▴'; }
+.export-bar > summary:hover { background: var(--primary-light); }
+.export-bar > summary:focus-visible { outline: 3px solid var(--accent); outline-offset: -3px; box-shadow: none; }
+.export-bar > summary .muted { color: #d7e2ee; font-weight: 500; }
+.export-body { padding: 10px 14px 12px; display: grid; gap: 10px; }
+.export-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.export-row-label { font-weight: 600; min-width: 150px; }
+.export-option { display: flex; align-items: flex-start; gap: 8px; }
+.export-option input { width: 18px; height: 18px; margin-top: 3px; accent-color: var(--primary); }
+.export-choice { border: 0; margin: 0; padding: 0; display: grid; gap: 6px; }
+.export-choice legend { font-weight: 600; padding: 0; margin-bottom: 4px; }
+.export-status { margin: 0; color: var(--muted); }
+.item-export { display: inline-flex; gap: 6px; align-items: center; }
+.item-export .btn-sm { min-height: 28px; padding: 2px 10px; font-size: 12.5px; }
+@media (max-width: 640px) {
+  .export-bar { margin: 8px 8px 0; }
+  .export-row-label { min-width: 100%; }
+}
+
+/* A TAG-IT document whose file is missing, served as the stored text (see proxyFile). */
+.stored-text-page main { max-width: 820px; margin: 0 auto; padding: 16px; }
+.stored-text-page h1 { font-size: 20px; margin: 0 0 10px; }
+.stored-text-page .card { padding: 16px; }
+.stored-text-page pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; margin: 0; }

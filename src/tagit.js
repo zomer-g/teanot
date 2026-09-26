@@ -7,6 +7,13 @@ const BASE = (process.env.TAGIT_API_URL || 'https://tag-it.biz').replace(/\/$/, 
 const TIMEOUT_MS = Number(process.env.TAGIT_TIMEOUT_MS || 120_000);
 const rulingsKey = () => process.env.TAGIT_API_KEY;
 export const SENTENCING_SCOPE = Number(process.env.TAGIT_SENTENCING_SCOPE || 1);
+// Conditional arrangements are catalogued in the same shape as sentencing decisions, in their own scope.
+export const ARRANGEMENTS_SCOPE = Number(process.env.TAGIT_ARRANGEMENTS_SCOPE || 18);
+export const CORPORA = {
+  sentencing: { scope: SENTENCING_SCOPE, label: 'גזרי דין' },
+  arrangements: { scope: ARRANGEMENTS_SCOPE, label: 'הסדרים מותנים' },
+};
+export const corpusScope = (corpus) => (CORPORA[corpus] ?? CORPORA.sentencing).scope;
 
 // Canonical meta.drug_types name → slug used by meta.drug_total_g_<slug> / meta.drug_total_n_<slug>.
 export const DRUG_SLUGS = {
@@ -63,12 +70,13 @@ async function request(path, params, key, { signal, raw = false, retries = 1 } =
 
 // ---------- Schema (field catalog) ----------
 
-let schemaCache = { at: 0, data: null };
+const schemaCache = new Map(); // scope → { at, data }
 
-export async function getSentencingSchema({ signal } = {}) {
-  if (schemaCache.data && Date.now() - schemaCache.at < 60 * 60 * 1000) return schemaCache.data;
-  const data = await request('/api/public/rulings/schema', { scope: SENTENCING_SCOPE }, rulingsKey(), { signal });
-  schemaCache = { at: Date.now(), data };
+export async function getSentencingSchema({ signal, scope = SENTENCING_SCOPE } = {}) {
+  const hit = schemaCache.get(scope);
+  if (hit && Date.now() - hit.at < 60 * 60 * 1000) return hit.data;
+  const data = await request('/api/public/rulings/schema', { scope }, rulingsKey(), { signal });
+  schemaCache.set(scope, { at: Date.now(), data });
   return data;
 }
 
@@ -94,6 +102,10 @@ const SORT_FIELDS = {
 const sortDirection = (p) => (p.sort === 'date' ? 'desc' : p.sort_direction === 'desc' ? 'desc' : 'asc');
 const FLAG_KEY_RE = /^meta\.[a-z0-9_]{1,60}$/;
 
+// Upstream refuses meta.court_instance in a filter that also carries a free-text query
+// ("text_query_filter_unsupported"). With a text query the clause is left out and applied to the results here.
+const courtInstanceIsUpstream = (p) => !p.text_query;
+
 export function buildSentencingFilter(p) {
   const clauses = [];
   for (const topic of p.topics ?? []) clauses.push({ field: 'meta.topics', op: 'contains', value: topic });
@@ -105,10 +117,11 @@ export function buildSentencingFilter(p) {
     if (q.max != null) clauses.push({ field, op: 'le', value: q.max });
     if (q.min == null && q.max == null) clauses.push({ field, op: 'not_null' });
   }
+  if (p.punishment_types?.length) clauses.push({ field: 'meta.punishment_types', op: 'in', value: p.punishment_types });
   if (p.offense_sections?.length) clauses.push({ field: 'meta.offense_sections', op: 'in', value: p.offense_sections });
   if (p.offense_law_sections?.length) clauses.push({ field: 'meta.offense_law_sections', op: 'in', value: p.offense_law_sections });
   if (p.drug_ordinance_sections?.length) clauses.push({ field: 'meta.drug_ordinance_sections', op: 'in', value: p.drug_ordinance_sections });
-  if (p.court_instances?.length) clauses.push({ field: 'meta.court_instance', op: 'in', value: p.court_instances });
+  if (p.court_instances?.length && courtInstanceIsUpstream(p)) clauses.push({ field: 'meta.court_instance', op: 'in', value: p.court_instances });
   if (p.prison_months_min != null) clauses.push({ field: 'meta.prison_actual_months', op: 'ge', value: p.prison_months_min });
   if (p.prison_months_max != null) clauses.push({ field: 'meta.prison_actual_months', op: 'le', value: p.prison_months_max });
   if (p.confessed != null) clauses.push({ field: 'meta.confessed', op: 'eq', value: p.confessed });
@@ -223,10 +236,10 @@ function withoutDuplicateDecisions(items) {
   });
 }
 
-export async function searchSentencing(p, { page = 1, signal } = {}) {
+export async function searchSentencing(p, { page = 1, signal, scope = SENTENCING_SCOPE } = {}) {
   const filter = buildSentencingFilter(p);
   const base = {
-    scope: SENTENCING_SCOPE,
+    scope,
     page,
     size: p.size ?? 30,
     filter,
@@ -237,18 +250,38 @@ export async function searchSentencing(p, { page = 1, signal } = {}) {
   if (p.text_query) Object.assign(base, { text_query: p.text_query, snippet_fragments: 1, snippet_chars: 240 });
   else base.sort = `${sortDirection(p) === 'desc' ? '-' : ''}${SORT_FIELDS[p.sort ?? 'severity']}`;
 
+  let textQueryDropped = false;
   for (let attempt = 0; attempt < 6; attempt++) {
     const fields = RESULT_FIELDS.filter((f) => !rejectedFields.has(f));
     try {
-      const data = await request('/api/public/rulings/documents', { ...base, fields: fields.join(',') }, rulingsKey(), { signal });
-      const items = (data.items ?? []).map((item) => ({
+      let data;
+      try {
+        data = await request('/api/public/rulings/documents', { ...base, fields: fields.join(',') }, rulingsKey(), { signal });
+      } catch (err) {
+        // Upstream refuses some filters together with a free-text query. The filters (sections, quantities) are the
+        // precise part of the search, so the text query is dropped and the same filters are searched again.
+        if (!(err instanceof TagitError && err.status === 400 && err.body?.error === 'text_query_filter_unsupported')) throw err;
+        console.warn(`[tagit] text_query dropped: ${JSON.stringify(err.body).slice(0, 300)}`);
+        delete base.text_query;
+        delete base.snippet_fragments;
+        delete base.snippet_chars;
+        base.sort = `${sortDirection(p) === 'desc' ? '-' : ''}${SORT_FIELDS[p.sort ?? 'severity']}`;
+        textQueryDropped = true;
+        data = await request('/api/public/rulings/documents', { ...base, fields: fields.join(',') }, rulingsKey(), { signal });
+      }
+      let items = (data.items ?? []).map((item) => ({
         ...normalizeRuling(item),
         snippet: item.snippet_text ?? item.snippet ?? null,
       }));
+      // The court instance was not sent upstream with a text query, so it is applied here.
+      const courtsHere = p.court_instances?.length && !courtInstanceIsUpstream(p) ? new Set(p.court_instances) : null;
+      if (courtsHere) items = items.filter((item) => courtsHere.has(item.courtInstance));
       items.sort(comparator(p));
       const unique = withoutDuplicateDecisions(items);
       return {
-        total: data.total ?? null,
+        // A count from upstream does not know about filtering done here.
+        total: courtsHere || textQueryDropped ? null : data.total ?? null,
+        textQueryDropped,
         duplicatesRemoved: items.length - unique.length,
         timedOut: Boolean(data.timed_out),
         page: data.page ?? page,

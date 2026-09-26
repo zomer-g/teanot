@@ -108,8 +108,22 @@ export async function streamGemini({ apiKey, model, system, tools, messages, sig
   }
   content.push({ type: 'provider_state', provider: 'gemini', parts });
 
+  // Nothing usable came back: the finish reason and the kinds of parts received are the only clue.
+  if (!text && !parts.some((p) => p.functionCall)) {
+    const kinds = parts.reduce((acc, p) => {
+      const kind = p.functionCall ? 'functionCall' : p.thought ? 'thought' : typeof p.text === 'string' ? 'text' : 'other';
+      acc[kind] = (acc[kind] ?? 0) + 1;
+      return acc;
+    }, {});
+    console.warn(`[gemini] empty reply: finishReason=${finishReason} blocked=${blocked} parts=${JSON.stringify(kinds)} `
+      + `thoughts=${usage.thoughtsTokenCount ?? 0} candidates=${usage.candidatesTokenCount ?? 0}`);
+  }
+
+  // MALFORMED_FUNCTION_CALL: the model was calling a tool and its call came out unusable, so Google dropped it
+  // and the reply carries nothing. Google's advice is to try the request again.
   const stopReason = blocked || REFUSALS.has(finishReason) ? 'refusal'
-    : finishReason === 'MAX_TOKENS' ? 'max_tokens'
+    : finishReason === 'MALFORMED_FUNCTION_CALL' ? 'malformed_tool_call'
+      : finishReason === 'MAX_TOKENS' ? 'max_tokens'
       : content.some((block) => block.type === 'tool_use') ? 'tool_use' : 'end_turn';
   const cached = usage.cachedContentTokenCount ?? 0;
   return {

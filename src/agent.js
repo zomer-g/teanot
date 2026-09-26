@@ -6,9 +6,11 @@ import { clearProviderAlert, recordConfigFailure, recordProviderFailure } from '
 import { loadSearchSetup } from './search-options.js';
 import { TOOLS, askUserSchema, executeTool, validationError } from './tools.js';
 
+// A malformed tool call is a provider hiccup, not an answer: the same request is tried again this many times.
+const MALFORMED_RETRIES = 2;
 const MAX_ITERATIONS = 12;
 
-export const SYSTEM_PROMPT = `You are the research assistant of the Zomer law office (עו"ד גיא זומר), used by Israeli criminal lawyers. Users give you an indictment (כתב אישום) or a verdict (הכרעת דין), as pasted text or an attached Word/PDF file. You find comparable sentencing decisions (גזרי דין) or guidelines (הנחיות) in the TAG-IT database and help the lawyer work with them. Always write to the user in Hebrew.
+export const SYSTEM_PROMPT = `You are the research assistant of the Zomer law office (עו"ד גיא זומר), used by Israeli criminal lawyers. Users give you an indictment (כתב אישום) or a verdict (הכרעת דין), as pasted text or an attached Word/PDF file. You find comparable sentencing decisions (גזרי דין), conditional arrangements (הסדרים מותנים) or guidelines (הנחיות) in the TAG-IT database and help the lawyer work with them. Always write to the user in Hebrew.
 
 ## Workflow
 
@@ -16,7 +18,9 @@ export const SYSTEM_PROMPT = `You are the research assistant of the Zomer law of
 
 2. Extract, for each defendant, every count: the offense, the law, the section as written, separate section tokens, and the facts that drive sentencing — drug type and quantity with unit, sums of money, weapon, injury, number of victims, period of time, the defendant's role. In an indictment these are the charges; in a verdict they are the convictions, with any acquittal marked. Record drug quantities per drug, converted to grams for kg or mg; pills, blotters, plants and doses are units.
 
-3. Decide what to search. If the user hasn't said whether they want sentencing decisions or guidelines, ask with ask_user (question id "mode", style "cards", options: sentencing, guidelines, both). The app shows this question as a search-setup form: the user ticks sentencing decisions and/or guidelines, and for sentencing chooses yes/no sentencing flags (confessed, agreed sentence, criminal record, deviation from the range and so on) and the severity order, and for guidelines chooses the issuing sources. Its answer carries a "setup" object. The app applies that setup to every search in this conversation by itself, so don't ask about those flags, the order or the sources again, and don't pass conflicting values; say in your summary which of them were applied. If several defendants face materially different counts, ask which defendant to research, with an "all defendants" option when a shared search makes sense. Put these in a single ask_user call.
+3. Decide what to search. Three corpora are available: sentencing decisions (גזרי דין), guidelines (הנחיות) and conditional arrangements (הסדרים מותנים — cases closed without an indictment in exchange for conditions such as a fine, compensation or community service). If the user hasn't said what they want, ask with ask_user (question id "mode", style "cards", options: sentencing, guidelines, arrangements, both).
+
+   Conditional arrangements are searched with search_conditional_arrangements, which takes the same filters as the sentencing search because the corpus is catalogued the same way. Search them when the user ticks them in the form, asks about arrangements, or asks what an offence ends with short of an indictment — they are the realistic alternative for a first offender in a light offence. An arrangement is closed by consent and without an indictment, so that corpus holds no imprisonment, no criminal record, no sentencing range and no court instance: those filters and the yes/no flags do not apply there and the app drops them. What it does hold is the punishment agreed — filter it with punishment_types (התחייבות, פיצוי, קנס, שירות לתועלת הציבור, שלילה). Call get_field_values with corpus "arrangements" before filtering on any other stored value there. The app shows this question as a search-setup form: the user ticks any of sentencing decisions, conditional arrangements and guidelines, for sentencing decisions chooses yes/no flags (confessed, agreed sentence, criminal record, deviation from the range and so on) and the severity order, for conditional arrangements chooses the kinds of punishment and the order, and for guidelines chooses the issuing sources. Its answer carries a "setup" object whose "kinds" list says exactly which corpora to search — search every corpus it names, and no other. The app applies that setup to every search in this conversation by itself, so don't ask about those flags, the order or the sources again, and don't pass conflicting values; say in your summary which of them were applied. If several defendants face materially different counts, ask which defendant to research, with an "all defendants" option when a shared search makes sense. Put these in a single ask_user call.
 
 4. Run an initial search, then refine. Build the first query yourself from the analysis; don't ask about parameters you can reasonably default:
    - Drug quantity: a range of about ±33% around the defendant's quantity of the relevant drug (30 g → 20–40 g).
@@ -31,7 +35,7 @@ export const SYSTEM_PROMPT = `You are the research assistant of the Zomer law of
 6. Follow-ups. Answer questions about the results, refine or broaden the search, compare cases, or read a decision or guideline in full with read_document. State facts about a case only from tool results or the documents in this conversation; when the data doesn't show something, say so.
 
 ## Citing decisions and guidelines
-Never type a case number, file number or id yourself: a wrong case number is worse than none. To mention a specific sentencing decision, write its ref from the tool result in double square brackets, for example [[ruling:58179]]; for a guideline, [[guideline:97227]]. The app turns each into a link labelled with the case number or title taken from the database. The number inside a ref is an internal id, not a case number.
+Never type a case number, file number or id yourself: a wrong case number is worse than none. To mention a specific sentencing decision, write its ref from the tool result in double square brackets, for example [[ruling:58179]]; for a conditional arrangement, [[arrangement:255627]]; for a guideline, [[guideline:97227]]. The app turns each into a link labelled with the case number or title taken from the database. The number inside a ref is an internal id, not a case number.
 
 ## Guidelines (הנחיות)
 search_guidelines matches each query as a plain substring anywhere in a directive's title or body, with no relevance ranking of its own. A short word such as "ירי" or "נשק", or a bare section number such as "329", matches hundreds of unrelated directives, so the tool refuses them. Use two to four distinctive phrases that would appear in a relevant directive's title, such as "עבירות נשק", "מדיניות ענישה", "צריכה עצמית", "מתחם ענישה". Before you filter by topic or source, call get_field_values with "guidelines.topic" or "guidelines.source" and copy a value exactly as it is stored: the corpus says "פרקליט המדינה", and a near miss such as "פרקליטות המדינה" silently returns nothing. The counts in that list are a floor, not the size of the result. Summarize which guidelines bear on the case and why, citing each as [[guideline:ID]] rather than typing its number, and read a guideline in full when its details matter.
@@ -115,23 +119,47 @@ export async function runTurn({ account, conversationId, turnId, userBlocks, use
     emit({ type: 'status', text: iteration === 0 ? 'חושב…' : 'ממשיך בעיבוד…' });
 
     let message;
-    try {
-      message = await streamModel(llm, {
-        system: SYSTEM_PROMPT,
-        tools: TOOLS,
-        messages,
-        signal,
-        onText: (delta) => emit({ type: 'text', delta }),
+    for (let attempt = 0; ; attempt++) {
+      let streamedText = false;
+      try {
+        message = await streamModel(llm, {
+          system: SYSTEM_PROMPT,
+          tools: TOOLS,
+          messages,
+          signal,
+          onText: (delta) => { streamedText = true; emit({ type: 'text', delta }); },
+        });
+      } catch (err) {
+        // Out of credit, a revoked key or a withdrawn model: flag it for the admin, and let the chat route
+        // tell the user what happened instead of guessing from the status code.
+        if (!signal?.aborted) err.llmKind = await recordProviderFailure({ provider: llm.provider, model: llm.model, err }).catch(() => undefined);
+        throw err;
+      }
+      // A tool call the provider could not parse leaves the reply empty; asking again usually works. Only while
+      // nothing has been shown yet, so a retry cannot repeat text the user already read.
+      if (message.stopReason !== 'malformed_tool_call' || streamedText || attempt >= MALFORMED_RETRIES) break;
+      console.warn(`[llm] turn=${turnId} step=${iteration} malformed tool call from ${llm.provider}; retrying (${attempt + 1}/${MALFORMED_RETRIES})`);
+      await recordModelUsage({
+        account,
+        conversationId,
+        turnId,
+        provider: llm.provider,
+        model: message.model,
+        requestedModel: llm.model,
+        usage: message.usage,
+        detail: { iteration, stop_reason: message.stopReason, tools: [], retry: attempt + 1 },
       });
-    } catch (err) {
-      // Out of credit, a revoked key or a withdrawn model: flag it for the admin, and let the chat route
-      // tell the user what happened instead of guessing from the status code.
-      if (!signal?.aborted) err.llmKind = await recordProviderFailure({ provider: llm.provider, model: llm.model, err }).catch(() => undefined);
-      throw err;
+      emit({ type: 'status', text: 'מנסה שוב…' });
     }
     await clearProviderAlert(llm.provider);
 
     const toolUses = message.content.filter((block) => block.type === 'tool_use');
+    const textChars = message.content.reduce((n, block) => n + (block.type === 'text' ? block.text.length : 0), 0);
+    // One line per model call: which model answered, how it stopped, what it asked for. A turn that ends in
+    // silence is a real failure mode, and this is what says why.
+    console.log(`[llm] turn=${turnId} step=${iteration} model=${message.model} stop=${message.stopReason} `
+      + `tools=${toolUses.map((t) => t.name).join(',') || '-'} textChars=${textChars} out=${message.usage?.output ?? 0}`);
+
     await recordModelUsage({
       account,
       conversationId,
@@ -142,6 +170,13 @@ export async function runTurn({ account, conversationId, turnId, userBlocks, use
       usage: message.usage,
       detail: { iteration, stop_reason: message.stopReason, tools: toolUses.map((t) => t.name) },
     });
+
+    // Still malformed after the retries: the empty reply is not saved, so it cannot spoil the next turn.
+    if (message.stopReason === 'malformed_tool_call' && !textChars && !toolUses.length) {
+      emit({ type: 'error', message: 'המודל ניסה להפעיל כלי ושלח בקשה פגומה, ולכן לא התקבלה תשובה. אפשר לשלוח את הבקשה שוב.' });
+      outcome = 'malformed_tool_call';
+      break;
+    }
 
     const uiItems = message.content
       .filter((block) => block.type === 'text' && block.text.trim())
@@ -161,6 +196,13 @@ export async function runTurn({ account, conversationId, turnId, userBlocks, use
       break;
     }
     if (!toolUses.length) {
+      // The model can stop having produced nothing at all (Gemini sometimes returns thinking alone). Say so
+      // rather than leaving the user with an empty answer.
+      if (!textChars) {
+        emit({ type: 'notice', text: 'המודל לא החזיר תשובה. אפשר לשלוח שוב את הבקשה.' });
+        outcome = 'empty_reply';
+        break;
+      }
       outcome = 'completed';
       break;
     }

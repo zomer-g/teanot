@@ -264,9 +264,11 @@ const TURN_STATUS = {
   refused: ['סירוב המודל', 'badge-error'],
   truncated: ['נקטע (אורך)', 'badge-muted'],
   iteration_limit: ['נעצר (מספר צעדים)', 'badge-muted'],
+  empty_reply: ['המודל לא החזיר תשובה', 'badge-error'],
+  malformed_tool_call: ['קריאת כלי פגומה', 'badge-error'],
 };
 const REQUEST_KINDS = { document: 'מסמך', text: 'הודעה', answers: 'תשובה לשאלות', more: 'תוצאות נוספות' };
-const SEARCH_ACTIONS = { search_sentencing: 'גזרי דין', search_guidelines: 'הנחיות', more_sentencing: 'עוד גזרי דין', read_document: 'קריאת מסמך' };
+const SEARCH_ACTIONS = { search_sentencing: 'גזרי דין', search_arrangements: 'הסדרים מותנים', search_guidelines: 'הנחיות', more_sentencing: 'עוד גזרי דין', more_arrangements: 'עוד הסדרים מותנים', read_document: 'קריאת מסמך', export: 'ייצוא' };
 
 function queryFilterParams() {
   const params = new URLSearchParams();
@@ -402,7 +404,7 @@ function describeEvent(e) {
     const what = d.tools?.length ? `כלים: ${d.tools.join(', ')}` : `סיום: ${d.stop_reason || '—'}`;
     return [e.model, what, d.priced === false ? 'ללא מחיר' : null].filter(Boolean).join(' · ');
   }
-  const actions = { search_sentencing: 'חיפוש גזרי דין', search_guidelines: 'חיפוש הנחיות', more_sentencing: 'תוצאות נוספות', read_document: 'קריאת מסמך', open_file: 'פתיחת קובץ' };
+  const actions = { search_sentencing: 'חיפוש גזרי דין', search_arrangements: 'חיפוש הסדרים מותנים', search_guidelines: 'חיפוש הנחיות', more_sentencing: 'תוצאות נוספות', more_arrangements: 'הסדרים נוספים', read_document: 'קריאת מסמך', open_file: 'פתיחת קובץ', open_text: 'פתיחת טקסט שמור', export: 'ייצוא' };
   const { title, parts } = describeSearch(d);
   return [actions[d.action] || d.action, title, ...parts].filter(Boolean).join(' · ');
 }
