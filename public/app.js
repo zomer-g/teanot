@@ -1106,7 +1106,7 @@ function relevanceBadge(r, mode) {
   const { score } = r.relevance;
   const level = levelOfScore(score);
   // Admins also see the number, to calibrate the threshold.
-  const text = mode === 'admin' ? `רלוונטיות ${score.toFixed(1)}` : isAdmin() ? `${level.term} (${score.toFixed(1)})` : level.term;
+  const text = isAdmin() ? `${level.term} (${score.toFixed(1)})` : level.term;
   return h('span', { class: `badge badge-relevance relevance-${level.tone}`, title: 'מידת הדמיון לתיק שבשיחה, כפי שהעריך מודל נוסף', text });
 }
 
@@ -1136,9 +1136,10 @@ function renderResults(data, block, corpus = SENTENCING) {
   const list = h('ol', { class: 'result-list' });
   const more = h('div', { class: 'results-more' });
 
-  // Relevance: in the users' mode the list opens at the admin's threshold and can be expanded or narrowed.
+  // Relevance: in the users' mode the list opens at the admin's threshold and can be expanded or narrowed. In the
+  // admins-only mode admins get the same view (to try it before users do), and everyone else sees plain results.
   const mode = data.relevance?.mode ?? 'off';
-  const filtering = mode === 'filter' && items.some((r) => r.relevance);
+  const filtering = (mode === 'filter' || (mode === 'admin' && isAdmin())) && items.some((r) => r.relevance);
   const minShown = data.relevance?.minShown ?? 5;
   let level = startLevel(data.relevance?.threshold);
   const levelStatus = h('p', { class: 'relevance-status small', role: 'status' });

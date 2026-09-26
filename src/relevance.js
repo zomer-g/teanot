@@ -185,6 +185,7 @@ export async function applyRelevance(result, { account, conversationId, turnId, 
     detail: { corpus, label, items: scored.items.length, failures: scored.failures || undefined, error: scored.lastError ?? undefined, mode: settings.mode, threshold: settings.threshold },
   }).catch((err) => console.warn('[relevance] usage not recorded', err.message));
   const shown = settings.mode === 'filter' ? openingSet(scored.items, settings.threshold, settings.minShown) : scored.items;
+  console.log(`[relevance] mode=${settings.mode} corpus=${corpus} scored=${scored.items.length - scored.failures}/${scored.items.length} opening=${shown.length}`);
   return { items: scored.items, shown, mode: settings.mode, threshold: settings.threshold, minShown: settings.minShown };
 }
 

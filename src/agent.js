@@ -59,8 +59,14 @@ async function saveMessage(conversationId, role, content, ui) {
   return rows[0].id;
 }
 
-function formatAnswers(answers) {
-  if (Array.isArray(answers) && answers.length) return JSON.stringify({ answers });
+function formatAnswers(answers, ask) {
+  const asked = new Set((ask?.questions ?? []).map((q) => q.id));
+  const matching = Array.isArray(answers) ? answers.filter((a) => asked.has(a.id)) : [];
+  if (matching.length) return JSON.stringify({ answers: matching });
+  // The search-setup form reopened by the user answers no open question: it replaces the setup instead.
+  if (answers?.some((a) => a.setup)) {
+    return 'The user did not answer these questions. Instead they reopened the search-setup form and changed the search setup; their message below says what to do.';
+  }
   return 'The user did not pick from the options and wrote a free message instead (below).';
 }
 
@@ -78,12 +84,13 @@ function pendingToolResults(history, answers) {
   return history[lastIndex].content
     .filter((block) => block.type === 'tool_use' && !answered.has(block.id))
     .map((block) => (block.name === 'ask_user'
-      ? { type: 'tool_result', tool_use_id: block.id, content: formatAnswers(answers) }
+      ? { type: 'tool_result', tool_use_id: block.id, content: formatAnswers(answers, block.input) }
       : { type: 'tool_result', tool_use_id: block.id, content: 'This action did not complete: the turn was interrupted.', is_error: true }));
 }
 
 // Returns how the turn ended: completed | awaiting_input | quota_exceeded | refused | truncated | iteration_limit.
-export async function runTurn({ account, conversationId, turnId, userBlocks, userUi, answers, emit, signal }) {
+// setupUpdated: the user changed the search setup mid-conversation, so this turn is expected to search again.
+export async function runTurn({ account, conversationId, turnId, userBlocks, userUi, answers, emit, signal, setupUpdated = false }) {
   // Resolved once per turn and before anything is saved: a missing key fails the request cleanly, and an admin
   // switching models mid-turn does not split one answer across two models.
   let llm;
@@ -102,6 +109,9 @@ export async function runTurn({ account, conversationId, turnId, userBlocks, use
 
   const messages = [...history.map((row) => ({ role: row.role, content: row.content })), { role: 'user', content: userContent }];
   let outcome = 'iteration_limit';
+  const SEARCH_TOOLS = new Set(['search_sentencing_decisions', 'search_conditional_arrangements', 'search_guidelines']);
+  let searched = false;
+  let nudged = false;
 
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
     // Re-checked before every model call, so blocking a user or lowering a limit takes effect mid-turn.
@@ -194,6 +204,16 @@ export async function runTurn({ account, conversationId, turnId, userBlocks, use
       emit({ type: 'notice', text: 'התשובה נקטעה כי הגיעה לאורך המרבי.' });
       outcome = 'truncated';
       break;
+    }
+    if (toolUses.some((t) => SEARCH_TOOLS.has(t.name))) searched = true;
+    // After a setup change the searches have to run again. A model that stops without searching is asked once more.
+    if (!toolUses.length && setupUpdated && !searched && !nudged && message.stopReason === 'end_turn') {
+      nudged = true;
+      console.warn(`[llm] turn=${turnId} step=${iteration} ended without searching after a setup change; asking again`);
+      const nudge = [{ type: 'text', text: '[Note from the app] The search setup changed and no search has run yet. Run the searches now, one per corpus named in the setup "kinds" list, and then summarize the results. Do not answer without searching.' }];
+      await saveMessage(conversationId, 'user', nudge, null);
+      messages.push({ role: 'user', content: nudge });
+      continue;
     }
     if (!toolUses.length) {
       // The model can stop having produced nothing at all (Gemini sometimes returns thinking alone). Say so

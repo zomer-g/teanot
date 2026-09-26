@@ -204,7 +204,16 @@ chatRouter.post('/chat', requireActive, rateLimit({ name: 'chat', limit: 30, win
       [conversation.id, docName, 'application/pdf', req.file.buffer]).catch((err) => console.warn('[chat] source file not stored', err.message));
   }
   const setupAnswer = answers?.find((a) => a.setup);
-  if (setupAnswer) await saveSearchSetup(conversation.id, setupAnswer.setup);
+  const savedSetup = setupAnswer ? await saveSearchSetup(conversation.id, setupAnswer.setup) : null;
+  // The search form reopened mid-conversation sends its answer with a message. The model gets the new setup and a
+  // plain instruction, since the user's words alone ("run the searches again") do not say what changed.
+  const setupUpdated = Boolean(savedSetup && text);
+  if (setupUpdated) {
+    userBlocks.push({
+      type: 'text',
+      text: `[Note from the app, not typed by the user] The user reopened the search-setup form and saved this setup, which now applies automatically to every search: ${JSON.stringify(savedSetup.case ? { ...savedSetup, case: { filters: savedSetup.case.filters } } : savedSetup)}. Run the searches again now, one per corpus in "kinds" (sentencing → search_sentencing_decisions, arrangements → search_conditional_arrangements, guidelines → search_guidelines), with parameters that fit the case, then summarize what changed.`,
+    });
+  }
 
   const controller = new AbortController();
   // Every event is numbered and kept for the life of the turn, so a browser whose connection was
@@ -236,7 +245,7 @@ chatRouter.post('/chat', requireActive, rateLimit({ name: 'chat', limit: 30, win
   let status = 'error';
   let errorText = null;
   try {
-    status = await runTurn({ account, conversationId: conversation.id, turnId, userBlocks, userUi, answers, emit, signal: controller.signal });
+    status = await runTurn({ account, conversationId: conversation.id, turnId, userBlocks, userUi, answers, emit, signal: controller.signal, setupUpdated });
   } catch (err) {
     if (controller.signal.aborted) {
       status = 'aborted';
