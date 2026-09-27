@@ -94,7 +94,7 @@ export const sentencingParamsSchema = z.object({
     .describe('meta.punishment_types values, ANY of. In conditional arrangements: התחייבות, פיצוי, קנס, שירות לתועלת הציבור, שלילה'),
   offense_sections: z.array(text).max(20).default([]).describe('meta.offense_sections tokens, ANY of; full "144(א)" or bare "144"'),
   offense_law_sections: z.array(text).max(20).default([]).describe('meta.offense_law_sections "law§section" pairs, ANY of'),
-  drug_ordinance_sections: z.array(text).max(20).default([]).describe('meta.drug_ordinance_sections (Dangerous Drugs Ordinance), ANY of, e.g. ["7", "13", "19א"]'),
+  drug_ordinance_sections: z.array(text).max(20).default([]).describe('meta.drug_ordinance_sections (Dangerous Drugs Ordinance), ANY of. Pass the single most distinctive section charged, e.g. ["13"] for trafficking; "7" matches every possession case and belongs here only when possession is the whole case'),
   court_instances: z.array(z.enum(tagit.COURT_INSTANCES)).default([]),
   date_from: isoDate,
   date_to: isoDate,
@@ -223,11 +223,19 @@ export function validationError(toolUse, issues) {
   };
 }
 
+// A page sorted by severity out of a set several times larger than the page is that set's extreme end, not a
+// sample of it; the tail of a broad filter (say, every possession case) is the least comparable part of the corpus.
+const BROAD_SET_FACTOR = 3;
+
 export function sentencingForModel(result, params, corpus = 'sentencing') {
   const prison = result.items.map((i) => i.prisonMonths).filter((v) => v != null);
+  const broad = result.total != null && params.sort !== 'date' && result.total > BROAD_SET_FACTOR * (result.size ?? params.size ?? 30);
   return {
     label: params.label,
     total_matches: result.total,
+    broad_set: broad
+      ? `${result.total} matches, sorted by severity: this page is only the ${params.sort_direction === 'desc' ? 'most severe' : 'most lenient'} end of the set, not a representative comparison set, and the ${params.sort_direction === 'desc' ? 'most severe' : 'most lenient'} cases of a broad filter are usually the least comparable ones. Do not summarize it as the range for this case. Narrow first: a quantity range around the principal drug's total, the single most distinctive Dangerous Drugs Ordinance section (13 for trafficking, never "7" alongside it), or a text_query naming the manner of the offence (e.g. "טלגרם"); if the form's fields cause the breadth, ask the user with concrete narrower options and then search with override_setup.`
+      : undefined,
     // total_matches counts documents; one decision can have several copies, which are removed from items.
     duplicate_copies_removed: result.duplicatesRemoved || undefined,
     total_timed_out: result.timedOut || undefined,

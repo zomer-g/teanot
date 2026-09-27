@@ -1565,34 +1565,55 @@ function isDrugCase(analysis) {
 // A number around the document's quantity, rounded so the form shows a plain figure.
 const roundQuantity = (n) => (n >= 10 ? Math.round(n) : Math.round(n * 10) / 10);
 
-// What the document already says: the drugs, the Dangerous Drugs Ordinance sections, and for a single drug a
-// quantity range of about ±33% (the same default the assistant uses).
+// The Dangerous Drugs Ordinance sections from the most to the least distinctive. A drug indictment nearly always
+// carries section 7 (possession) next to the section that actually describes the case, and filtering on "7" as
+// well matches every personal-use possession case in the corpus, so only the first section found is kept.
+const ORDINANCE_SECTION_PRIORITY = ['13', '14', '6', '10', '3', '9', '9א', '12', '21', '19', '10א', '36', '36א', '31', '25', '2', '1', '4', '19א', '7'];
+
+// What the document already says, as a filter that finds comparable cases rather than the union of everything
+// mentioned: the principal drug (the one with the largest total, per defendant) with a quantity range of about
+// ±33% around that total (the same default the assistant uses), and the single most distinctive ordinance section.
 function filtersFromAnalysis(analysis, fields) {
   const byKey = new Map(fields.map((f) => [f.key, f]));
   const initial = {};
   const typesField = byKey.get(DRUG_TYPES_KEY);
   const drugsByDefendant = (analysis?.defendants ?? []).map((d) => (d.counts ?? []).flatMap((c) => c.drugs ?? []));
   const drugName = (drug) => (typesField?.options.includes(drug.name) ? drug.name : DRUG_NAMES_BY_SLUG[drug.slug] ?? null);
-  const names = [...new Set(drugsByDefendant.flat().map(drugName).filter(Boolean))].filter((n) => typesField?.options.includes(n));
-  if (typesField && names.length) initial[DRUG_TYPES_KEY] = names;
-  const quantityField = byKey.get(QUANTITY_KEY);
-  if (quantityField && names.length === 1) {
-    // The largest quantity any one defendant holds of that drug, all in one unit.
-    const totals = drugsByDefendant.map((drugs) => drugs.filter((d) => drugName(d) === names[0] && d.amount > 0));
-    const units = new Set(totals.flat().map((d) => d.unit ?? 'grams'));
-    const amount = Math.max(0, ...totals.map((drugs) => drugs.reduce((sum, d) => sum + d.amount, 0)));
-    if (amount > 0 && units.size === 1) {
-      const unit = units.has('units') ? 'n' : 'g';
-      if (unit === 'g' || quantityField.units?.some((u) => u.value === 'n')) {
-        initial[QUANTITY_KEY] = { min: roundQuantity(amount * 0.67), max: roundQuantity(amount * 1.33), unit };
-      }
+  // Each defendant's total of each drug, in grams and in count units separately.
+  const totals = [];
+  drugsByDefendant.forEach((drugs, defendant) => {
+    const sums = new Map();
+    for (const drug of drugs) {
+      const name = drugName(drug);
+      if (!name || !typesField?.options.includes(name) || !(drug.amount > 0)) continue;
+      const unit = drug.unit === 'units' ? 'n' : 'g';
+      const key = `${name}|${unit}`;
+      sums.set(key, { name, unit, amount: (sums.get(key)?.amount ?? 0) + drug.amount, defendant });
     }
+    totals.push(...sums.values());
+  });
+  const quantityField = byKey.get(QUANTITY_KEY);
+  const countable = quantityField?.units?.some((u) => u.value === 'n');
+  // Grams first (most drugs are weighed and most decisions record grams); pills and blotters only when nothing
+  // was weighed and the form can search by count.
+  const principal = totals.filter((t) => t.unit === 'g').sort((a, b) => b.amount - a.amount)[0]
+    ?? (countable ? totals.filter((t) => t.unit === 'n').sort((a, b) => b.amount - a.amount)[0] : null);
+  if (typesField && principal) {
+    initial[DRUG_TYPES_KEY] = [principal.name];
+    if (quantityField) {
+      initial[QUANTITY_KEY] = { min: roundQuantity(principal.amount * 0.67), max: roundQuantity(principal.amount * 1.33), unit: principal.unit };
+    }
+  } else if (typesField) {
+    // No quantity anywhere: the drugs named, so the search is at least about the same substances.
+    const names = [...new Set(drugsByDefendant.flat().map(drugName).filter(Boolean))].filter((n) => typesField.options.includes(n));
+    if (names.length) initial[DRUG_TYPES_KEY] = names;
   }
   const sectionsField = byKey.get(DRUG_ORDINANCE_KEY);
   if (sectionsField) {
-    const tokens = allCounts(analysis).filter(isDrugOrdinance).flatMap((c) => c.section_tokens ?? []).map((t) => String(t).trim());
-    const sections = [...new Set(tokens)].filter((t) => sectionsField.options.includes(t));
-    if (sections.length) initial[DRUG_ORDINANCE_KEY] = sections;
+    const tokens = new Set(allCounts(analysis).filter(isDrugOrdinance).flatMap((c) => c.section_tokens ?? []).map((t) => String(t).trim()));
+    const section = ORDINANCE_SECTION_PRIORITY.find((s) => tokens.has(s) && sectionsField.options.includes(s))
+      ?? sectionsField.options.find((s) => tokens.has(s));
+    if (section) initial[DRUG_ORDINANCE_KEY] = [section];
   }
   return initial;
 }
